@@ -284,17 +284,13 @@ export class PlayerController {
       this.airTime = 0;
       this.updateGroundedPhysics(dt, pos);
 
-      // Smooth ground following - slower lerp = more stable over bumps
+      // Very stable ground following - just stay on ground
       const targetY = this.groundHeight + 0.15;
-      // Speed-based stability: faster = smoother over bumps
-      const speed = Math.sqrt(this.velocity.x ** 2 + this.velocity.z ** 2);
-      const lerpSpeed = THREE.MathUtils.lerp(0.25, 0.12, Math.min(speed / 30, 1));
-      const newY = THREE.MathUtils.lerp(pos.y, targetY, lerpSpeed);
       this.velocity.y = 0;
 
       this.body.setNextKinematicTranslation({
         x: pos.x + this.velocity.x * dt,
-        y: newY,
+        y: targetY, // Snap directly to ground - no bounce
         z: pos.z + this.velocity.z * dt
       });
     } else {
@@ -736,8 +732,8 @@ export class PlayerController {
 
       if (normal.y < 0) normal.negate();
 
-      // Smooth normal following to prevent visual jitter
-      this.groundNormal.lerp(normal, 0.08);
+      // Very smooth normal following - prevents board rotation jitter
+      this.groundNormal.lerp(normal, 0.05);
       this.groundNormal.normalize();
     }
   }
