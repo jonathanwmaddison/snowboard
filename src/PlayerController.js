@@ -284,10 +284,13 @@ export class PlayerController {
       this.airTime = 0;
       this.updateGroundedPhysics(dt, pos);
 
-      // When grounded, directly set Y to ground height (no velocity bounce)
+      // Smooth ground following - slower lerp = more stable over bumps
       const targetY = this.groundHeight + 0.15;
-      const newY = THREE.MathUtils.lerp(pos.y, targetY, 0.3);
-      this.velocity.y = 0; // No vertical velocity when grounded
+      // Speed-based stability: faster = smoother over bumps
+      const speed = Math.sqrt(this.velocity.x ** 2 + this.velocity.z ** 2);
+      const lerpSpeed = THREE.MathUtils.lerp(0.25, 0.12, Math.min(speed / 30, 1));
+      const newY = THREE.MathUtils.lerp(pos.y, targetY, lerpSpeed);
+      this.velocity.y = 0;
 
       this.body.setNextKinematicTranslation({
         x: pos.x + this.velocity.x * dt,

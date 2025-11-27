@@ -40,8 +40,8 @@ class Game {
     this.player = new PlayerController(this.sceneManager, this.physicsWorld);
     this.player.init(terrainInfo.startPosition);
 
-    // Create camera
-    this.cameraController = new CameraController(this.sceneManager);
+    // Create camera with terrain reference for ground collision
+    this.cameraController = new CameraController(this.sceneManager, this.terrain);
     this.cameraController.setInitialPosition(this.player.getPosition());
 
     // Create UI

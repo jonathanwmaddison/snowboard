@@ -1,8 +1,9 @@
 import * as THREE from 'three';
 
 export class CameraController {
-  constructor(sceneManager) {
+  constructor(sceneManager, terrain = null) {
     this.sceneManager = sceneManager;
+    this.terrain = terrain; // Reference to terrain for ground height checks
 
     // Base FOV that changes with speed
     this.baseFOV = 65;
@@ -112,6 +113,15 @@ export class CameraController {
     // Speed-adaptive smoothing (smoother at high speed)
     const posLag = THREE.MathUtils.lerp(0.08, 0.04, speedFactor);
     this.currentPosition.lerp(targetPos, posLag);
+
+    // === KEEP CAMERA ABOVE GROUND ===
+    if (this.terrain) {
+      const groundHeight = this.terrain.getHeightAt(this.currentPosition.x, this.currentPosition.z);
+      const minCameraHeight = groundHeight + 1.5; // At least 1.5m above ground
+      if (this.currentPosition.y < minCameraHeight) {
+        this.currentPosition.y = minCameraHeight;
+      }
+    }
 
     // === LOOK AT POINT ===
     const aheadX = Math.sin(this.smoothedHeading) * this.lookAhead;
