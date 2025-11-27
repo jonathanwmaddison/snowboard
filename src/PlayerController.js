@@ -57,6 +57,19 @@ export class PlayerController {
     // Turn state for smooth carving
     this.turnMomentum = 0; // Accumulated turn momentum
 
+    // === WEIGHT TRANSFER SYSTEM ===
+    // Simulates how riders shift weight for control
+    this.weightForward = 0; // -1 (tail) to +1 (nose)
+    this.weightSide = 0; // -1 (heelside) to +1 (toeside)
+    this.effectivePressure = 1; // 0-1, how much edge is engaged
+
+    // === AIR ROTATION STATE ===
+    this.pitch = 0; // Forward/back rotation
+    this.roll = 0; // Barrel roll
+    this.pitchVelocity = 0;
+    this.rollVelocity = 0;
+    this.spinVelocity = 0; // Accumulated spin momentum
+
     // Collider mesh for debug
     this.colliderMesh = null;
   }
@@ -163,30 +176,90 @@ export class PlayerController {
   }
 
   onLanding(dt) {
-    // Landing impact - absorb some vertical velocity
     const impactSpeed = Math.abs(this.velocity.y);
+    const speed2D = Math.sqrt(this.velocity.x ** 2 + this.velocity.z ** 2);
 
-    if (impactSpeed > 15) {
-      // Hard landing - lose some speed
-      const speedLoss = (impactSpeed - 15) * 0.03;
+    // === CHECK LANDING ALIGNMENT ===
+    // Good landing: board roughly level and aligned with velocity
+    const pitchMisalign = Math.abs(this.pitch);
+    const rollMisalign = Math.abs(this.roll);
+
+    // Calculate how aligned board heading is with velocity direction
+    let headingMisalign = 0;
+    if (speed2D > 3) {
+      const velHeading = Math.atan2(-this.velocity.x, this.velocity.z);
+      headingMisalign = Math.abs(this.normalizeAngle(velHeading - this.heading));
+    }
+
+    // === LANDING QUALITY (0 = crash, 1 = perfect) ===
+    let landingQuality = 1.0;
+
+    // Pitch penalty (nose/tail crash)
+    if (pitchMisalign > 0.5) {
+      landingQuality -= (pitchMisalign - 0.5) * 0.8;
+    }
+
+    // Roll penalty (edge catch)
+    if (rollMisalign > 0.4) {
+      landingQuality -= (rollMisalign - 0.4) * 0.6;
+    }
+
+    // Heading misalignment (landing sideways)
+    if (headingMisalign > 0.8) {
+      landingQuality -= (headingMisalign - 0.8) * 0.3;
+    }
+
+    landingQuality = Math.max(0, landingQuality);
+
+    // === IMPACT EFFECTS ===
+    if (impactSpeed > 12) {
+      // Hard landing - quality affects speed loss
+      const baseSpeedLoss = (impactSpeed - 12) * 0.025;
+      const qualityMod = 2 - landingQuality; // Bad landing = more speed loss
+      const speedLoss = baseSpeedLoss * qualityMod;
+
       this.velocity.x *= (1 - speedLoss);
       this.velocity.z *= (1 - speedLoss);
     }
 
-    // Landing while turning - slight speed boost if aligned well
-    const speed2D = Math.sqrt(this.velocity.x ** 2 + this.velocity.z ** 2);
-    if (speed2D > 5 && Math.abs(this.slipAngle) < 0.3) {
-      // Clean landing bonus
+    // === CLEAN LANDING BONUS ===
+    if (landingQuality > 0.8 && speed2D > 8 && this.airTime > 0.5) {
+      // Style points! Clean landing after good air time
       const forward = new THREE.Vector3(
         -Math.sin(this.heading),
         0,
         Math.cos(this.heading)
       );
-      this.velocity.x += forward.x * 0.5;
-      this.velocity.z += forward.z * 0.5;
+
+      // Small speed boost for stomped landing
+      const stompBonus = 1.0 + this.airTime * 0.3;
+      this.velocity.x += forward.x * stompBonus;
+      this.velocity.z += forward.z * stompBonus;
     }
 
+    // === ALIGNMENT CORRECTION ===
+    // Board tries to align with velocity on landing (natural behavior)
+    if (speed2D > 5 && headingMisalign > 0.2) {
+      const velHeading = Math.atan2(-this.velocity.x, this.velocity.z);
+      const correction = this.normalizeAngle(velHeading - this.heading);
+
+      // Gradually correct, more at higher speeds
+      const correctionRate = Math.min(speed2D * 0.015, 0.4);
+      this.heading += correction * correctionRate;
+    }
+
+    // === BAD LANDING WOBBLE ===
+    if (landingQuality < 0.6) {
+      // Add some instability from bad landing
+      this.headingVelocity += (Math.random() - 0.5) * (1 - landingQuality) * 2;
+    }
+
+    // Reset rotation state
     this.velocity.y = 0;
+    this.pitch = 0;
+    this.roll = 0;
+    this.pitchVelocity = 0;
+    this.rollVelocity = 0;
   }
 
   updateGroundedPhysics(dt, pos) {
@@ -207,62 +280,105 @@ export class PlayerController {
       Math.sin(this.heading)
     );
 
-    // === EDGE ANGLE WITH MOMENTUM ===
-    const maxEdge = 1.05; // ~60 degrees max
-    this.targetEdgeAngle = this.input.steer * maxEdge;
+    // === WEIGHT TRANSFER SIMULATION ===
+    // Weight shifts based on input and current motion
+    const targetWeightForward = this.input.lean * 0.8;
+    const targetWeightSide = this.input.steer * 0.7;
 
-    // Edge transition speed - faster when changing direction, slower when holding
+    // Weight shifts gradually - heavier feel
+    this.weightForward = THREE.MathUtils.lerp(this.weightForward, targetWeightForward, 6 * dt);
+    this.weightSide = THREE.MathUtils.lerp(this.weightSide, targetWeightSide, 8 * dt);
+
+    // === EDGE ANGLE FROM WEIGHT AND INPUT ===
+    // Edge angle is combination of direct input and body position
+    const maxEdge = 1.1; // ~63 degrees max
+    const inputEdge = this.input.steer * maxEdge;
+    const weightEdgeInfluence = this.weightSide * 0.2; // Weight adds subtle edge
+
+    this.targetEdgeAngle = inputEdge + weightEdgeInfluence;
+
+    // Edge transition - faster when unweighting, slower when pressuring
+    const unweighting = Math.abs(this.input.lean) > 0.3 && this.input.lean < 0;
     const edgeChanging = Math.sign(this.targetEdgeAngle) !== Math.sign(this.edgeAngle);
-    const edgeLerpSpeed = edgeChanging ? 18 : 12; // Faster edge-to-edge transitions
+
+    let edgeLerpSpeed;
+    if (unweighting && edgeChanging) {
+      edgeLerpSpeed = 22; // Fast edge-to-edge when unweighted
+    } else if (edgeChanging) {
+      edgeLerpSpeed = 14; // Medium when changing edges with weight
+    } else {
+      edgeLerpSpeed = 10; // Slower when holding edge (committed)
+    }
 
     this.edgeAngle = THREE.MathUtils.lerp(this.edgeAngle, this.targetEdgeAngle, edgeLerpSpeed * dt);
 
     const absEdge = Math.abs(this.edgeAngle);
     const edgeSign = Math.sign(this.edgeAngle);
 
-    // === CARVED TURN PHYSICS WITH MOMENTUM ===
+    // === EFFECTIVE PRESSURE (how much the edge bites) ===
+    // Forward weight = more front edge bite, back weight = more tail control
+    const basePressure = 0.7;
+    const weightPressure = Math.abs(this.weightForward) * 0.15;
+    const edgePressure = absEdge * 0.2; // More edge = more pressure
+
+    // Speed reduces effective pressure (harder to hold edge at speed)
+    const speedPressureLoss = Math.max(0, (speed2D - 20) * 0.008);
+
+    this.effectivePressure = THREE.MathUtils.clamp(
+      basePressure + weightPressure + edgePressure - speedPressureLoss,
+      0.4, 1.0
+    );
+
+    // === CARVED TURN PHYSICS ===
     if (speed2D > 0.3) {
       let targetAngularVel = 0;
 
       if (absEdge > 0.03) {
-        // Calculate turn radius from edge angle (sidecut geometry)
+        // Turn radius from sidecut geometry
         const sinEdge = Math.sin(absEdge);
         const turnRadius = this.sidecutRadius / Math.max(sinEdge, 0.08);
 
-        // Base angular velocity from physics: v/r
+        // Base angular velocity: v/r
         const baseAngularVel = speed2D / turnRadius;
 
-        // Speed affects turn feel:
-        // - Low speed: more direct, responsive
-        // - High speed: smoother, more committed turns
-        const speedFactor = THREE.MathUtils.lerp(1.3, 0.9, Math.min(speed2D / 35, 1));
+        // === WEIGHT DISTRIBUTION AFFECTS TURN CHARACTER ===
+        // Forward weight: tighter, more aggressive initiation
+        // Back weight: looser, more drifty, better for speed scrubbing
+        let weightTurnMod = 1.0;
+        if (this.weightForward > 0.2) {
+          // Nose press - tighter turns, quicker initiation
+          weightTurnMod = 1.0 + this.weightForward * 0.4;
+        } else if (this.weightForward < -0.2) {
+          // Tail press - wider turns, more slide
+          weightTurnMod = 1.0 + this.weightForward * 0.2; // Reduces turn rate
+        }
 
-        // Input intensity boost - harder input = tighter turn
-        const inputIntensity = Math.pow(Math.abs(this.input.steer), 0.8);
-        const inputBoost = 1 + inputIntensity * 0.6;
+        // Pressure affects how much edge angle translates to turning
+        const pressureEffect = 0.6 + this.effectivePressure * 0.5;
 
-        // Lean affects turn initiation - forward lean helps initiate
-        const leanBoost = this.input.lean > 0.2 ? 1 + this.input.lean * 0.3 : 1;
+        // Input intensity - progressive response
+        const inputIntensity = Math.pow(Math.abs(this.input.steer), 0.85);
+        const inputBoost = 1 + inputIntensity * 0.5;
 
-        targetAngularVel = baseAngularVel * speedFactor * inputBoost * leanBoost * edgeSign;
+        targetAngularVel = baseAngularVel * weightTurnMod * pressureEffect * inputBoost * edgeSign;
       }
 
-      // Smooth angular velocity with momentum (prevents jerky turns)
-      const angularLerp = absEdge > 0.3 ? 8 : 12; // Committed edge = more momentum
+      // Angular velocity smoothing with momentum
+      const angularLerp = absEdge > 0.4 ? 6 : 10; // Deep edge = more committed
       this.headingVelocity = THREE.MathUtils.lerp(this.headingVelocity, targetAngularVel, angularLerp * dt);
 
-      // Clamp max turn rate
-      const maxAngularVel = 3.2;
+      // Max turn rate - speed dependent
+      const maxAngularVel = THREE.MathUtils.lerp(3.5, 2.5, Math.min(speed2D / 35, 1));
       this.headingVelocity = THREE.MathUtils.clamp(this.headingVelocity, -maxAngularVel, maxAngularVel);
 
       this.heading += this.headingVelocity * dt;
     } else {
-      // Slow speed - direct steering for control
-      this.headingVelocity *= 0.9;
-      this.heading += this.input.steer * 1.5 * dt;
+      // Slow speed - pivot steering
+      this.headingVelocity *= 0.85;
+      this.heading += this.input.steer * 2.0 * dt;
     }
 
-    // === GRAVITY / SLOPE ACCELERATION ===
+    // === GRAVITY / SLOPE ===
     const slopeDir = this.getSlopeDirection();
     const slopeSteepness = 1 - this.groundNormal.y;
     const gravityAccel = g * slopeSteepness * 5.5;
@@ -271,62 +387,63 @@ export class PlayerController {
     const forwardSpeed = this.velocity.dot(forward);
     const lateralSpeed = this.velocity.dot(right);
 
-    // Track slip angle for feedback
+    // Track slip angle
     if (speed2D > 1) {
       const velDir = Math.atan2(-this.velocity.x, this.velocity.z);
       this.slipAngle = this.normalizeAngle(velDir - this.heading);
     }
 
-    // === GRIP BASED ON EDGE ANGLE AND SPEED ===
-    // More edge = more grip, but speed creates forces that can break grip
-    const baseGrip = 0.65;
-    const edgeGripBonus = absEdge * 0.35; // Edge adds up to 35% more grip
-    const speedGripPenalty = Math.max(0, (speed2D - 15) * 0.008);
+    // === GRIP SYSTEM ===
+    // Base grip + edge bonus - speed penalty - turn stress
+    const baseGrip = 0.6;
+    const edgeGrip = absEdge * this.effectivePressure * 0.4;
+    const speedPenalty = Math.max(0, (speed2D - 12) * 0.006);
+    const turnStress = Math.abs(this.headingVelocity) * speed2D * 0.002;
 
-    // Sharp turns at high speed can break traction
-    const turnStress = Math.abs(this.headingVelocity) * speed2D * 0.003;
+    // Tail weight reduces grip (more drifty)
+    const weightGripMod = this.weightForward < -0.3 ? Math.abs(this.weightForward) * 0.15 : 0;
 
-    let finalGrip = baseGrip + edgeGripBonus - speedGripPenalty - turnStress;
-    finalGrip = THREE.MathUtils.clamp(finalGrip, 0.4, 0.98);
+    let finalGrip = baseGrip + edgeGrip - speedPenalty - turnStress - weightGripMod;
+    finalGrip = THREE.MathUtils.clamp(finalGrip, 0.35, 0.97);
 
-    // Apply grip - reduce lateral velocity
+    // Apply grip
     const newLateralSpeed = lateralSpeed * (1 - finalGrip);
 
     // === RECONSTRUCT VELOCITY ===
     this.velocity.x = forward.x * forwardSpeed + right.x * newLateralSpeed;
     this.velocity.z = forward.z * forwardSpeed + right.z * newLateralSpeed;
 
-    // === APPLY GRAVITY ===
+    // === GRAVITY ===
     this.velocity.x += slopeDir.x * gravityAccel * dt;
     this.velocity.z += slopeDir.z * gravityAccel * dt;
 
-    // === DRAG - Edge and carving affects resistance ===
-    // Flat base = fastest, carving = some resistance, sliding = most resistance
-    const baseDrag = 0.998;
-    const carveDrag = absEdge * 0.002;
-    const slideDrag = Math.abs(this.slipAngle) * 0.005;
+    // === DRAG ===
+    const baseDrag = 0.9985;
+    const carveDrag = absEdge * 0.0015;
+    const slideDrag = Math.abs(this.slipAngle) * 0.004;
     const drag = baseDrag - carveDrag - slideDrag;
     this.velocity.x *= drag;
     this.velocity.z *= drag;
 
-    // === RIDER INPUT: LEAN (tuck/brake) ===
+    // === WEIGHT-BASED THRUST/BRAKE ===
     if (this.input.lean > 0.1) {
-      // Tuck forward - reduces drag, slight acceleration feel
-      const thrust = this.input.lean * 2.5;
+      // Tuck - reduces drag, compresses for speed
+      const tuck = this.input.lean;
+      const thrust = tuck * 2.0;
       this.velocity.x += forward.x * thrust * dt;
       this.velocity.z += forward.z * thrust * dt;
     }
 
     if (this.input.lean < -0.1) {
-      // Lean back / brake - apply friction
+      // Stand up / brake
       const brakeStrength = Math.abs(this.input.lean);
-      const brakeFactor = 1 - brakeStrength * dt * 5;
+      const brakeFactor = 1 - brakeStrength * dt * 4;
       this.velocity.x *= brakeFactor;
       this.velocity.z *= brakeFactor;
     }
 
     // === SPEED LIMITS ===
-    const maxSpeed = 50;
+    const maxSpeed = 55;
     if (speed2D > maxSpeed) {
       const scale = maxSpeed / speed2D;
       this.velocity.x *= scale;
@@ -334,31 +451,73 @@ export class PlayerController {
     }
 
     // === GROUND FOLLOWING ===
+    this.updateGroundFollowing(pos, speed2D, dt);
+
+    // === JUMP ===
+    if (this.input.jump) {
+      this.initiateJump(speed2D, forward);
+    }
+
+    // Reset air rotation when grounded
+    this.pitch = THREE.MathUtils.lerp(this.pitch, 0, 5 * dt);
+    this.roll = THREE.MathUtils.lerp(this.roll, 0, 5 * dt);
+    this.pitchVelocity *= 0.9;
+    this.rollVelocity *= 0.9;
+
+    // Store spin momentum for jumps
+    this.spinVelocity = this.headingVelocity * 0.3;
+  }
+
+  updateGroundFollowing(pos, speed2D, dt) {
     const targetY = this.groundHeight + 0.15;
     const yDiff = targetY - pos.y;
 
-    // Smoother ground following with speed-based response
-    const groundResponse = 15 + speed2D * 0.5;
+    // Speed-adaptive ground response
+    // Faster = smoother (less terrain jitter), slower = more responsive
+    const baseResponse = 12;
+    const speedResponse = Math.min(speed2D * 0.3, 8);
+    const groundResponse = baseResponse + speedResponse;
+
     if (yDiff > 0) {
+      // Need to go up - responsive
       this.velocity.y = yDiff * groundResponse;
-    } else if (yDiff > -0.5) {
-      this.velocity.y = yDiff * groundResponse * 0.6;
+    } else if (yDiff > -0.3) {
+      // Slightly above ground - gentle correction
+      this.velocity.y = yDiff * groundResponse * 0.5;
+    } else if (yDiff > -1.0) {
+      // Getting airborne from terrain
+      this.velocity.y = Math.max(this.velocity.y - 15 * dt, yDiff * 5);
+    }
+  }
+
+  initiateJump(speed2D, forward) {
+    // Jump power based on weight position
+    // Nose weight = smaller pop, tail weight = bigger pop (ollie style)
+    let jumpPower = 6.0;
+
+    if (this.weightForward < -0.2) {
+      // Tail pop - proper ollie
+      jumpPower = 7.5 + Math.abs(this.weightForward) * 2;
+    } else if (this.weightForward > 0.3) {
+      // Nose pop - nollie
+      jumpPower = 5.5;
     }
 
-    // === JUMP - Ollie with speed boost ===
-    if (this.input.jump) {
-      // Jump power scales slightly with speed
-      const jumpPower = 6.5 + Math.min(speed2D * 0.05, 1.5);
-      this.velocity.y = jumpPower;
+    // Speed bonus
+    jumpPower += Math.min(speed2D * 0.04, 1.5);
 
-      // Small forward boost when jumping
-      if (this.input.lean > 0) {
-        this.velocity.x += forward.x * 2;
-        this.velocity.z += forward.z * 2;
-      }
+    this.velocity.y = jumpPower;
 
-      this.input.jump = false;
+    // Forward momentum from tuck
+    if (this.input.lean > 0.2) {
+      this.velocity.x += forward.x * 1.5;
+      this.velocity.z += forward.z * 1.5;
     }
+
+    // Carry spin momentum into air
+    this.spinVelocity = this.headingVelocity * 0.5;
+
+    this.input.jump = false;
   }
 
   // Helper to normalize angle to [-PI, PI]
@@ -372,38 +531,76 @@ export class PlayerController {
     // Track air time
     this.airTime += dt;
 
-    // Gravity - slightly floaty for game feel
-    const gravity = 18;
+    // Gravity - slightly floaty for game feel, increases over time
+    const baseGravity = 16;
+    const gravityRamp = Math.min(this.airTime * 2, 6); // Ramps up over time
+    const gravity = baseGravity + gravityRamp;
     this.velocity.y -= gravity * dt;
 
-    // === AIR CONTROL ===
-    // Spins! More control when tucked
-    const spinRate = 2.5;
-    const tuckBonus = this.input.lean > 0.3 ? 1 + this.input.lean * 0.5 : 1;
+    // === SPIN CONTROL (Y-axis rotation) ===
+    // Carry momentum from ground, plus air input
+    const baseSpin = this.spinVelocity;
 
-    if (Math.abs(this.input.steer) > 0.1) {
-      this.heading += this.input.steer * spinRate * tuckBonus * dt;
-      // Also rotate edge angle for style
-      this.edgeAngle = THREE.MathUtils.lerp(this.edgeAngle, this.input.steer * 0.5, 3 * dt);
+    // Tuck increases spin control (like pulling arms in)
+    const tuckFactor = this.input.lean > 0.2 ? 1 + this.input.lean * 0.8 : 1;
+
+    // Input adds to spin
+    const spinInput = this.input.steer * 3.5 * tuckFactor;
+
+    // Combine momentum and input
+    const targetSpin = baseSpin + spinInput;
+    this.headingVelocity = THREE.MathUtils.lerp(this.headingVelocity, targetSpin, 4 * dt);
+
+    // Spin dampens slowly in air
+    this.spinVelocity *= 0.995;
+
+    this.heading += this.headingVelocity * dt;
+
+    // === FLIP CONTROL (pitch - front/back flips) ===
+    if (Math.abs(this.input.lean) > 0.2) {
+      // Forward lean = front flip, back lean = back flip
+      const flipInput = -this.input.lean * 4.0; // Negative because forward lean = nose down
+      this.pitchVelocity = THREE.MathUtils.lerp(this.pitchVelocity, flipInput, 3 * dt);
     } else {
-      // Edge relaxes when not steering
-      this.edgeAngle *= 0.92;
+      // No input - pitch stabilizes slowly
+      this.pitchVelocity *= 0.97;
+    }
+    this.pitch += this.pitchVelocity * dt;
+
+    // === ROLL/GRAB STYLE ===
+    // Edge input creates roll in air (style grabs)
+    if (Math.abs(this.input.steer) > 0.3) {
+      const rollTarget = this.input.steer * 0.4;
+      this.roll = THREE.MathUtils.lerp(this.roll, rollTarget, 5 * dt);
+    } else {
+      this.roll *= 0.95;
     }
 
-    // Forward/back flip influence (subtle)
-    if (Math.abs(this.input.lean) > 0.3) {
-      // Small pitch adjustment for tricks
-      const pitchInfluence = this.input.lean * 0.5 * dt;
-      // This affects landing - could add proper rotation later
+    // Edge angle follows roll for visual
+    this.edgeAngle = THREE.MathUtils.lerp(this.edgeAngle, this.roll * 0.5, 4 * dt);
+
+    // === AIR DRAG ===
+    // Tuck reduces drag
+    const dragFactor = this.input.lean > 0.3 ? 0.999 : 0.997;
+    this.velocity.x *= dragFactor;
+    this.velocity.z *= dragFactor;
+
+    // === TERMINAL VELOCITY ===
+    if (this.velocity.y < -40) {
+      this.velocity.y = -40;
     }
 
-    // Minimal air drag
-    this.velocity.x *= 0.998;
-    this.velocity.z *= 0.998;
-
-    // Terminal velocity
-    if (this.velocity.y < -35) {
-      this.velocity.y = -35;
+    // === AIR STEERING (subtle) ===
+    // Can slightly adjust trajectory in air
+    if (Math.abs(this.input.steer) > 0.5) {
+      const airSteer = this.input.steer * 0.5 * dt;
+      const right = new THREE.Vector3(
+        Math.cos(this.heading),
+        0,
+        Math.sin(this.heading)
+      );
+      this.velocity.x += right.x * airSteer;
+      this.velocity.z += right.z * airSteer;
     }
   }
 
@@ -502,35 +699,65 @@ export class PlayerController {
     const pos = this.body.translation();
     this.mesh.position.set(pos.x, pos.y, pos.z);
 
-    // Method based on research: Quaternion.FromToRotation approach
-    // Step 1: Create heading rotation (around world Y axis)
-    const headingQuat = new THREE.Quaternion();
-    headingQuat.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -this.heading);
+    if (this.isGrounded) {
+      // === GROUNDED: Align to terrain + edge angle ===
 
-    // Step 2: Create slope alignment rotation
-    // This rotates from world-up to ground normal
-    const worldUp = new THREE.Vector3(0, 1, 0);
-    const slopeQuat = new THREE.Quaternion();
-    slopeQuat.setFromUnitVectors(worldUp, this.groundNormal);
+      // Step 1: Heading rotation
+      const headingQuat = new THREE.Quaternion();
+      headingQuat.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -this.heading);
 
-    // Step 3: Combine rotations
-    // Apply heading first, then tilt to match slope
-    // Final = slopeQuat * headingQuat
-    this.mesh.quaternion.copy(headingQuat);
-    this.mesh.quaternion.premultiply(slopeQuat);
+      // Step 2: Slope alignment
+      const worldUp = new THREE.Vector3(0, 1, 0);
+      const slopeQuat = new THREE.Quaternion();
+      slopeQuat.setFromUnitVectors(worldUp, this.groundNormal);
 
-    // Step 4: Apply edge angle (carving tilt) around board's forward axis
-    if (Math.abs(this.edgeAngle) > 0.001) {
-      // Get board's forward direction in world space
-      const boardForward = new THREE.Vector3(0, 0, 1);
-      boardForward.applyQuaternion(this.mesh.quaternion);
+      // Combine
+      this.mesh.quaternion.copy(headingQuat);
+      this.mesh.quaternion.premultiply(slopeQuat);
 
-      const edgeQuat = new THREE.Quaternion();
-      edgeQuat.setFromAxisAngle(boardForward, this.edgeAngle);
-      this.mesh.quaternion.premultiply(edgeQuat);
+      // Step 3: Edge angle (carving tilt)
+      if (Math.abs(this.edgeAngle) > 0.001) {
+        const boardForward = new THREE.Vector3(0, 0, 1);
+        boardForward.applyQuaternion(this.mesh.quaternion);
+
+        const edgeQuat = new THREE.Quaternion();
+        edgeQuat.setFromAxisAngle(boardForward, this.edgeAngle);
+        this.mesh.quaternion.premultiply(edgeQuat);
+      }
+
+      // Step 4: Subtle weight shift visual (nose/tail press)
+      if (Math.abs(this.weightForward) > 0.1) {
+        const boardRight = new THREE.Vector3(1, 0, 0);
+        boardRight.applyQuaternion(this.mesh.quaternion);
+
+        const pressQuat = new THREE.Quaternion();
+        pressQuat.setFromAxisAngle(boardRight, this.weightForward * 0.15);
+        this.mesh.quaternion.premultiply(pressQuat);
+      }
+    } else {
+      // === AIRBORNE: Full rotation control ===
+
+      // Build rotation from Euler angles for air tricks
+      const euler = new THREE.Euler(
+        this.pitch,           // X: front/back flip
+        -this.heading,        // Y: spin
+        this.roll,            // Z: barrel roll
+        'YXZ'                 // Rotation order
+      );
+      this.mesh.quaternion.setFromEuler(euler);
+
+      // Add edge angle styling
+      if (Math.abs(this.edgeAngle) > 0.001) {
+        const boardForward = new THREE.Vector3(0, 0, 1);
+        boardForward.applyQuaternion(this.mesh.quaternion);
+
+        const edgeQuat = new THREE.Quaternion();
+        edgeQuat.setFromAxisAngle(boardForward, this.edgeAngle);
+        this.mesh.quaternion.premultiply(edgeQuat);
+      }
     }
 
-    // Collider mesh
+    // Collider mesh follows
     this.colliderMesh.position.copy(this.mesh.position);
     this.colliderMesh.quaternion.copy(this.mesh.quaternion);
   }
@@ -559,6 +786,18 @@ export class PlayerController {
     this.airTime = 0;
     this.turnMomentum = 0;
     this.groundNormal.set(0, 1, 0);
+
+    // Reset weight transfer
+    this.weightForward = 0;
+    this.weightSide = 0;
+    this.effectivePressure = 1;
+
+    // Reset air rotation
+    this.pitch = 0;
+    this.roll = 0;
+    this.pitchVelocity = 0;
+    this.rollVelocity = 0;
+    this.spinVelocity = 0;
   }
 
   getPosition() {

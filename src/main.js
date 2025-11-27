@@ -114,12 +114,14 @@ class Game {
     // Update player
     this.player.update(deltaTime);
 
-    // Update camera
+    // Update camera with additional state for dynamic effects
     this.cameraController.update(
       deltaTime,
       this.player.getPosition(),
       this.player.getVelocity(),
-      this.player.getHeading()
+      this.player.getHeading(),
+      this.player.edgeAngle,
+      this.player.isGrounded
     );
 
     // Update UI
