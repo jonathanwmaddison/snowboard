@@ -41,15 +41,21 @@ export class PlayerController {
     // Movement state
     this.velocity = new THREE.Vector3();
     this.heading = 0;
-    this.headingVelocity = 0; // Track angular velocity for damping
+    this.headingVelocity = 0; // Track angular velocity for smoothing
     this.edgeAngle = 0; // Current edge tilt (radians, + = toeside, - = heelside)
+    this.targetEdgeAngle = 0; // Target edge for smooth transitions
     this.slipAngle = 0; // Angle between velocity and board heading
     this.isGrounded = false;
+    this.wasGrounded = false; // Track landing
     this.groundNormal = new THREE.Vector3(0, 1, 0);
     this.groundHeight = 0;
+    this.airTime = 0; // Track time in air
 
     this.startPosition = { x: 0, y: 5, z: 0 };
     this.currentSpeed = 0;
+
+    // Turn state for smooth carving
+    this.turnMomentum = 0; // Accumulated turn momentum
 
     // Collider mesh for debug
     this.colliderMesh = null;
@@ -116,10 +122,19 @@ export class PlayerController {
     const position = this.body.translation();
     const pos = new THREE.Vector3(position.x, position.y, position.z);
 
+    // Track previous grounded state
+    this.wasGrounded = this.isGrounded;
+
     // Ground detection
     this.checkGround(pos);
 
+    // Landing detection
+    if (this.isGrounded && !this.wasGrounded) {
+      this.onLanding(dt);
+    }
+
     if (this.isGrounded) {
+      this.airTime = 0;
       this.updateGroundedPhysics(dt, pos);
     } else {
       this.updateAirPhysics(dt, pos);
@@ -147,6 +162,33 @@ export class PlayerController {
     }
   }
 
+  onLanding(dt) {
+    // Landing impact - absorb some vertical velocity
+    const impactSpeed = Math.abs(this.velocity.y);
+
+    if (impactSpeed > 15) {
+      // Hard landing - lose some speed
+      const speedLoss = (impactSpeed - 15) * 0.03;
+      this.velocity.x *= (1 - speedLoss);
+      this.velocity.z *= (1 - speedLoss);
+    }
+
+    // Landing while turning - slight speed boost if aligned well
+    const speed2D = Math.sqrt(this.velocity.x ** 2 + this.velocity.z ** 2);
+    if (speed2D > 5 && Math.abs(this.slipAngle) < 0.3) {
+      // Clean landing bonus
+      const forward = new THREE.Vector3(
+        -Math.sin(this.heading),
+        0,
+        Math.cos(this.heading)
+      );
+      this.velocity.x += forward.x * 0.5;
+      this.velocity.z += forward.z * 0.5;
+    }
+
+    this.velocity.y = 0;
+  }
+
   updateGroundedPhysics(dt, pos) {
     const g = 9.81;
 
@@ -154,8 +196,6 @@ export class PlayerController {
     const speed2D = Math.sqrt(this.velocity.x ** 2 + this.velocity.z ** 2);
 
     // === BOARD DIRECTION VECTORS ===
-    // Note: Using negative sin to match THREE.js rotation convention
-    // (positive heading = counter-clockwise rotation when viewed from above)
     const forward = new THREE.Vector3(
       -Math.sin(this.heading),
       0,
@@ -167,72 +207,126 @@ export class PlayerController {
       Math.sin(this.heading)
     );
 
-    // === SIMPLE EDGE ANGLE FROM INPUT ===
-    // Direct mapping: steer input -> edge angle
-    const maxEdge = 0.8; // ~46 degrees max
-    const targetEdge = this.input.steer * maxEdge;
+    // === EDGE ANGLE WITH MOMENTUM ===
+    const maxEdge = 1.05; // ~60 degrees max
+    this.targetEdgeAngle = this.input.steer * maxEdge;
 
-    // Smooth but responsive edge transitions
-    this.edgeAngle = THREE.MathUtils.lerp(this.edgeAngle, targetEdge, 10 * dt);
+    // Edge transition speed - faster when changing direction, slower when holding
+    const edgeChanging = Math.sign(this.targetEdgeAngle) !== Math.sign(this.edgeAngle);
+    const edgeLerpSpeed = edgeChanging ? 18 : 12; // Faster edge-to-edge transitions
+
+    this.edgeAngle = THREE.MathUtils.lerp(this.edgeAngle, this.targetEdgeAngle, edgeLerpSpeed * dt);
 
     const absEdge = Math.abs(this.edgeAngle);
+    const edgeSign = Math.sign(this.edgeAngle);
 
-    // === SIMPLE TURNING ===
-    // Turn rate proportional to edge angle and speed
+    // === CARVED TURN PHYSICS WITH MOMENTUM ===
     if (speed2D > 0.3) {
-      // Base turn rate
-      const turnRate = this.input.steer * 2.0;
+      let targetAngularVel = 0;
 
-      // Speed affects turn feel
-      const speedMod = Math.min(1.5, 0.5 + speed2D * 0.05);
+      if (absEdge > 0.03) {
+        // Calculate turn radius from edge angle (sidecut geometry)
+        const sinEdge = Math.sin(absEdge);
+        const turnRadius = this.sidecutRadius / Math.max(sinEdge, 0.08);
 
-      this.heading += turnRate * speedMod * dt;
+        // Base angular velocity from physics: v/r
+        const baseAngularVel = speed2D / turnRadius;
+
+        // Speed affects turn feel:
+        // - Low speed: more direct, responsive
+        // - High speed: smoother, more committed turns
+        const speedFactor = THREE.MathUtils.lerp(1.3, 0.9, Math.min(speed2D / 35, 1));
+
+        // Input intensity boost - harder input = tighter turn
+        const inputIntensity = Math.pow(Math.abs(this.input.steer), 0.8);
+        const inputBoost = 1 + inputIntensity * 0.6;
+
+        // Lean affects turn initiation - forward lean helps initiate
+        const leanBoost = this.input.lean > 0.2 ? 1 + this.input.lean * 0.3 : 1;
+
+        targetAngularVel = baseAngularVel * speedFactor * inputBoost * leanBoost * edgeSign;
+      }
+
+      // Smooth angular velocity with momentum (prevents jerky turns)
+      const angularLerp = absEdge > 0.3 ? 8 : 12; // Committed edge = more momentum
+      this.headingVelocity = THREE.MathUtils.lerp(this.headingVelocity, targetAngularVel, angularLerp * dt);
+
+      // Clamp max turn rate
+      const maxAngularVel = 3.2;
+      this.headingVelocity = THREE.MathUtils.clamp(this.headingVelocity, -maxAngularVel, maxAngularVel);
+
+      this.heading += this.headingVelocity * dt;
+    } else {
+      // Slow speed - direct steering for control
+      this.headingVelocity *= 0.9;
+      this.heading += this.input.steer * 1.5 * dt;
     }
 
     // === GRAVITY / SLOPE ACCELERATION ===
     const slopeDir = this.getSlopeDirection();
     const slopeSteepness = 1 - this.groundNormal.y;
-    const gravityAccel = g * slopeSteepness * 6;
+    const gravityAccel = g * slopeSteepness * 5.5;
 
-    // === VELOCITY HANDLING ===
-    // Split into forward and lateral components
+    // === VELOCITY COMPONENTS ===
     const forwardSpeed = this.velocity.dot(forward);
     const lateralSpeed = this.velocity.dot(right);
 
-    // Lateral grip: edge angle increases grip
-    // More edge = velocity follows board direction more closely
-    const lateralGrip = 0.85 + absEdge * 0.1; // 85-95% grip
-    const adjustedLateral = lateralSpeed * (1 - lateralGrip);
+    // Track slip angle for feedback
+    if (speed2D > 1) {
+      const velDir = Math.atan2(-this.velocity.x, this.velocity.z);
+      this.slipAngle = this.normalizeAngle(velDir - this.heading);
+    }
 
-    // Reconstruct velocity - mostly follows board direction
-    this.velocity.x = forward.x * forwardSpeed + right.x * adjustedLateral;
-    this.velocity.z = forward.z * forwardSpeed + right.z * adjustedLateral;
+    // === GRIP BASED ON EDGE ANGLE AND SPEED ===
+    // More edge = more grip, but speed creates forces that can break grip
+    const baseGrip = 0.65;
+    const edgeGripBonus = absEdge * 0.35; // Edge adds up to 35% more grip
+    const speedGripPenalty = Math.max(0, (speed2D - 15) * 0.008);
+
+    // Sharp turns at high speed can break traction
+    const turnStress = Math.abs(this.headingVelocity) * speed2D * 0.003;
+
+    let finalGrip = baseGrip + edgeGripBonus - speedGripPenalty - turnStress;
+    finalGrip = THREE.MathUtils.clamp(finalGrip, 0.4, 0.98);
+
+    // Apply grip - reduce lateral velocity
+    const newLateralSpeed = lateralSpeed * (1 - finalGrip);
+
+    // === RECONSTRUCT VELOCITY ===
+    this.velocity.x = forward.x * forwardSpeed + right.x * newLateralSpeed;
+    this.velocity.z = forward.z * forwardSpeed + right.z * newLateralSpeed;
 
     // === APPLY GRAVITY ===
     this.velocity.x += slopeDir.x * gravityAccel * dt;
     this.velocity.z += slopeDir.z * gravityAccel * dt;
 
-    // === SIMPLE DRAG ===
-    const drag = 0.995;
+    // === DRAG - Edge and carving affects resistance ===
+    // Flat base = fastest, carving = some resistance, sliding = most resistance
+    const baseDrag = 0.998;
+    const carveDrag = absEdge * 0.002;
+    const slideDrag = Math.abs(this.slipAngle) * 0.005;
+    const drag = baseDrag - carveDrag - slideDrag;
     this.velocity.x *= drag;
     this.velocity.z *= drag;
 
-    // === RIDER INPUT: LEAN ===
+    // === RIDER INPUT: LEAN (tuck/brake) ===
     if (this.input.lean > 0.1) {
-      const thrust = this.input.lean * 4;
+      // Tuck forward - reduces drag, slight acceleration feel
+      const thrust = this.input.lean * 2.5;
       this.velocity.x += forward.x * thrust * dt;
       this.velocity.z += forward.z * thrust * dt;
     }
 
     if (this.input.lean < -0.1) {
-      const brakeStrength = Math.abs(this.input.lean) * 0.8;
-      const brakeFactor = 1 - brakeStrength * dt * 3;
+      // Lean back / brake - apply friction
+      const brakeStrength = Math.abs(this.input.lean);
+      const brakeFactor = 1 - brakeStrength * dt * 5;
       this.velocity.x *= brakeFactor;
       this.velocity.z *= brakeFactor;
     }
 
     // === SPEED LIMITS ===
-    const maxSpeed = 40;
+    const maxSpeed = 50;
     if (speed2D > maxSpeed) {
       const scale = maxSpeed / speed2D;
       this.velocity.x *= scale;
@@ -243,15 +337,26 @@ export class PlayerController {
     const targetY = this.groundHeight + 0.15;
     const yDiff = targetY - pos.y;
 
+    // Smoother ground following with speed-based response
+    const groundResponse = 15 + speed2D * 0.5;
     if (yDiff > 0) {
-      this.velocity.y = yDiff * 20;
+      this.velocity.y = yDiff * groundResponse;
     } else if (yDiff > -0.5) {
-      this.velocity.y = yDiff * 10;
+      this.velocity.y = yDiff * groundResponse * 0.6;
     }
 
-    // === JUMP ===
+    // === JUMP - Ollie with speed boost ===
     if (this.input.jump) {
-      this.velocity.y = 6;
+      // Jump power scales slightly with speed
+      const jumpPower = 6.5 + Math.min(speed2D * 0.05, 1.5);
+      this.velocity.y = jumpPower;
+
+      // Small forward boost when jumping
+      if (this.input.lean > 0) {
+        this.velocity.x += forward.x * 2;
+        this.velocity.z += forward.z * 2;
+      }
+
       this.input.jump = false;
     }
   }
@@ -264,20 +369,42 @@ export class PlayerController {
   }
 
   updateAirPhysics(dt, pos) {
-    // Simple air physics
-    this.velocity.y -= 20 * dt; // Gravity (slightly higher for snappy feel)
+    // Track air time
+    this.airTime += dt;
 
-    // Maintain some air control
+    // Gravity - slightly floaty for game feel
+    const gravity = 18;
+    this.velocity.y -= gravity * dt;
+
+    // === AIR CONTROL ===
+    // Spins! More control when tucked
+    const spinRate = 2.5;
+    const tuckBonus = this.input.lean > 0.3 ? 1 + this.input.lean * 0.5 : 1;
+
     if (Math.abs(this.input.steer) > 0.1) {
-      this.heading += this.input.steer * 1.5 * dt;
+      this.heading += this.input.steer * spinRate * tuckBonus * dt;
+      // Also rotate edge angle for style
+      this.edgeAngle = THREE.MathUtils.lerp(this.edgeAngle, this.input.steer * 0.5, 3 * dt);
+    } else {
+      // Edge relaxes when not steering
+      this.edgeAngle *= 0.92;
     }
 
-    // Air drag
-    this.velocity.x *= 0.995;
-    this.velocity.z *= 0.995;
+    // Forward/back flip influence (subtle)
+    if (Math.abs(this.input.lean) > 0.3) {
+      // Small pitch adjustment for tricks
+      const pitchInfluence = this.input.lean * 0.5 * dt;
+      // This affects landing - could add proper rotation later
+    }
 
-    // Edge angle relaxes in air
-    this.edgeAngle *= 0.95;
+    // Minimal air drag
+    this.velocity.x *= 0.998;
+    this.velocity.z *= 0.998;
+
+    // Terminal velocity
+    if (this.velocity.y < -35) {
+      this.velocity.y = -35;
+    }
   }
 
   checkGround(pos) {
@@ -303,18 +430,27 @@ export class PlayerController {
   }
 
   sampleGroundNormal(pos, RAPIER) {
-    // Sample 3 points: center-front, center-back, and center
-    // This gives us a plane that represents the local terrain slope
-    const sampleDist = 0.6; // Half board length
+    // Sample points along board direction for better terrain following
+    const sampleDist = 0.7;
 
-    const points = [];
-    const offsets = [
-      { x: 0, z: sampleDist },   // front
-      { x: 0, z: -sampleDist },  // back
-      { x: sampleDist, z: 0 }    // right side
+    // Board-relative offsets
+    const cosH = Math.cos(this.heading);
+    const sinH = Math.sin(this.heading);
+
+    // Transform local offsets to world space based on heading
+    const localOffsets = [
+      { x: 0, z: sampleDist },   // front of board
+      { x: 0, z: -sampleDist },  // back of board
+      { x: sampleDist, z: 0 }    // side
     ];
 
-    for (const offset of offsets) {
+    const worldOffsets = localOffsets.map(o => ({
+      x: o.x * cosH - o.z * sinH,
+      z: o.x * sinH + o.z * cosH
+    }));
+
+    const points = [];
+    for (const offset of worldOffsets) {
       const ray = new RAPIER.Ray(
         { x: pos.x + offset.x, y: pos.y + 3, z: pos.z + offset.z },
         { x: 0, y: -1, z: 0 }
@@ -330,19 +466,17 @@ export class PlayerController {
     }
 
     if (points.length >= 3) {
-      // Calculate normal from the 3 points using cross product
-      // v1 = back - front, v2 = right - front
-      const v1 = points[1].clone().sub(points[0]); // back to front vector
-      const v2 = points[2].clone().sub(points[0]); // right to front vector
-
-      // Normal = v2 × v1 (order matters for correct "up" direction)
+      const v1 = points[1].clone().sub(points[0]);
+      const v2 = points[2].clone().sub(points[0]);
       const normal = new THREE.Vector3().crossVectors(v2, v1).normalize();
 
-      // Ensure normal points upward
       if (normal.y < 0) normal.negate();
 
-      // Smooth interpolation to avoid jitter (research recommends this)
-      this.groundNormal.lerp(normal, 0.15);
+      // Speed-adaptive smoothing - faster = smoother to prevent jitter
+      const speed2D = Math.sqrt(this.velocity.x ** 2 + this.velocity.z ** 2);
+      const lerpFactor = THREE.MathUtils.lerp(0.2, 0.1, Math.min(speed2D / 30, 1));
+
+      this.groundNormal.lerp(normal, lerpFactor);
       this.groundNormal.normalize();
     }
   }
@@ -417,9 +551,14 @@ export class PlayerController {
     this.heading = 0;
     this.headingVelocity = 0;
     this.edgeAngle = 0;
+    this.targetEdgeAngle = 0;
     this.slipAngle = 0;
     this.currentSpeed = 0;
     this.isGrounded = false;
+    this.wasGrounded = false;
+    this.airTime = 0;
+    this.turnMomentum = 0;
+    this.groundNormal.set(0, 1, 0);
   }
 
   getPosition() {
