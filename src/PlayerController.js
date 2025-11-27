@@ -72,6 +72,13 @@ export class PlayerController {
 
     // Collider mesh for debug
     this.colliderMesh = null;
+
+    // Snow spray particles
+    this.sprayParticles = null;
+    this.sprayPositions = null;
+    this.sprayVelocities = [];
+    this.sprayLifetimes = [];
+    this.maxParticles = 200;
   }
 
   init(startPosition) {
@@ -96,6 +103,7 @@ export class PlayerController {
 
     this.createVisualMesh();
     this.createColliderMesh();
+    this.createSprayParticles();
   }
 
   createVisualMesh() {
@@ -126,6 +134,132 @@ export class PlayerController {
     });
     this.colliderMesh = new THREE.Mesh(geometry, material);
     this.sceneManager.addColliderMesh(this.colliderMesh);
+  }
+
+  createSprayParticles() {
+    // Create point geometry for snow spray
+    const geometry = new THREE.BufferGeometry();
+
+    // Initialize position buffer
+    this.sprayPositions = new Float32Array(this.maxParticles * 3);
+    const sizes = new Float32Array(this.maxParticles);
+
+    // Initialize all particles as inactive (at origin with size 0)
+    for (let i = 0; i < this.maxParticles; i++) {
+      this.sprayPositions[i * 3] = 0;
+      this.sprayPositions[i * 3 + 1] = -1000; // Below terrain
+      this.sprayPositions[i * 3 + 2] = 0;
+      sizes[i] = 0;
+
+      this.sprayVelocities.push(new THREE.Vector3());
+      this.sprayLifetimes.push(0);
+    }
+
+    geometry.setAttribute('position', new THREE.BufferAttribute(this.sprayPositions, 3));
+    geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+    // Simple white material for snow
+    const material = new THREE.PointsMaterial({
+      color: 0xffffff,
+      size: 0.15,
+      transparent: true,
+      opacity: 0.8,
+      sizeAttenuation: true
+    });
+
+    this.sprayParticles = new THREE.Points(geometry, material);
+    this.sceneManager.add(this.sprayParticles);
+
+    this.nextParticleIndex = 0;
+  }
+
+  updateSprayParticles(dt, speed, isCarving, edgeAngle) {
+    if (!this.sprayParticles) return;
+
+    const pos = this.body.translation();
+    const positions = this.sprayParticles.geometry.attributes.position.array;
+    const sizes = this.sprayParticles.geometry.attributes.size.array;
+
+    // Spawn new particles when grounded and moving
+    if (this.isGrounded && speed > 3) {
+      // More particles during carves and at higher speeds
+      const spawnRate = Math.min(speed * 0.3, 8) + (isCarving ? 5 : 0);
+      const particlesToSpawn = Math.floor(spawnRate * dt * 60);
+
+      for (let i = 0; i < particlesToSpawn; i++) {
+        const idx = this.nextParticleIndex;
+        this.nextParticleIndex = (this.nextParticleIndex + 1) % this.maxParticles;
+
+        // Spawn at board edge (based on edge angle)
+        const side = Math.sign(edgeAngle) || (Math.random() > 0.5 ? 1 : -1);
+        const boardRight = new THREE.Vector3(
+          Math.cos(this.heading),
+          0,
+          Math.sin(this.heading)
+        );
+        const boardBack = new THREE.Vector3(
+          Math.sin(this.heading),
+          0,
+          -Math.cos(this.heading)
+        );
+
+        // Spawn position - at edge of board, slightly behind
+        const spawnX = pos.x + boardRight.x * side * 0.2 + boardBack.x * 0.5 + (Math.random() - 0.5) * 0.3;
+        const spawnY = pos.y + 0.05;
+        const spawnZ = pos.z + boardRight.z * side * 0.2 + boardBack.z * 0.5 + (Math.random() - 0.5) * 0.3;
+
+        positions[idx * 3] = spawnX;
+        positions[idx * 3 + 1] = spawnY;
+        positions[idx * 3 + 2] = spawnZ;
+
+        // Velocity - spray outward and up
+        const spraySpeed = speed * 0.15 + Math.random() * 2;
+        this.sprayVelocities[idx].set(
+          boardRight.x * side * spraySpeed + (Math.random() - 0.5) * 1.5,
+          1.5 + Math.random() * 2,
+          boardRight.z * side * spraySpeed + (Math.random() - 0.5) * 1.5
+        );
+
+        // Add some of the board's velocity
+        this.sprayVelocities[idx].x -= this.velocity.x * 0.1;
+        this.sprayVelocities[idx].z -= this.velocity.z * 0.1;
+
+        this.sprayLifetimes[idx] = 0.4 + Math.random() * 0.4; // 0.4-0.8 seconds
+        sizes[idx] = 0.1 + Math.random() * 0.15;
+      }
+    }
+
+    // Update existing particles
+    for (let i = 0; i < this.maxParticles; i++) {
+      if (this.sprayLifetimes[i] > 0) {
+        this.sprayLifetimes[i] -= dt;
+
+        // Apply velocity and gravity
+        positions[i * 3] += this.sprayVelocities[i].x * dt;
+        positions[i * 3 + 1] += this.sprayVelocities[i].y * dt;
+        positions[i * 3 + 2] += this.sprayVelocities[i].z * dt;
+
+        // Gravity
+        this.sprayVelocities[i].y -= 12 * dt;
+
+        // Air resistance
+        this.sprayVelocities[i].multiplyScalar(0.98);
+
+        // Fade out
+        if (this.sprayLifetimes[i] < 0.2) {
+          sizes[i] *= 0.95;
+        }
+
+        // Kill if too old
+        if (this.sprayLifetimes[i] <= 0) {
+          positions[i * 3 + 1] = -1000;
+          sizes[i] = 0;
+        }
+      }
+    }
+
+    this.sprayParticles.geometry.attributes.position.needsUpdate = true;
+    this.sprayParticles.geometry.attributes.size.needsUpdate = true;
   }
 
   update(deltaTime) {
@@ -168,6 +302,10 @@ export class PlayerController {
 
     // Update visuals
     this.updateMesh();
+
+    // Update particle effects
+    const isCarving = this.isGrounded && Math.abs(this.edgeAngle) > 0.3;
+    this.updateSprayParticles(dt, this.currentSpeed, isCarving, this.edgeAngle);
 
     // Reset if fallen
     if (pos.y < -250) {
@@ -469,25 +607,27 @@ export class PlayerController {
   }
 
   updateGroundFollowing(pos, speed2D, dt) {
-    const targetY = this.groundHeight + 0.15;
+    const targetY = this.groundHeight + 0.12;
     const yDiff = targetY - pos.y;
 
-    // Speed-adaptive ground response
-    // Faster = smoother (less terrain jitter), slower = more responsive
-    const baseResponse = 12;
-    const speedResponse = Math.min(speed2D * 0.3, 8);
-    const groundResponse = baseResponse + speedResponse;
+    // Much smoother ground following - use smooth interpolation
+    // Higher speed = smoother to prevent jitter from terrain detail
+    const smoothFactor = THREE.MathUtils.lerp(0.15, 0.08, Math.min(speed2D / 30, 1));
 
-    if (yDiff > 0) {
-      // Need to go up - responsive
-      this.velocity.y = yDiff * groundResponse;
-    } else if (yDiff > -0.3) {
-      // Slightly above ground - gentle correction
-      this.velocity.y = yDiff * groundResponse * 0.5;
-    } else if (yDiff > -1.0) {
-      // Getting airborne from terrain
-      this.velocity.y = Math.max(this.velocity.y - 15 * dt, yDiff * 5);
+    if (yDiff > 0.01) {
+      // Below target - smoothly rise
+      // Use smooth interpolation instead of direct velocity assignment
+      const targetVelY = yDiff * 8;
+      this.velocity.y = THREE.MathUtils.lerp(this.velocity.y, targetVelY, smoothFactor);
+    } else if (yDiff > -0.2) {
+      // Near target or slightly above - very gentle correction
+      const targetVelY = yDiff * 5;
+      this.velocity.y = THREE.MathUtils.lerp(this.velocity.y, targetVelY, smoothFactor * 0.5);
+    } else if (yDiff > -0.8) {
+      // Above ground but not airborne - let gravity work
+      this.velocity.y = THREE.MathUtils.lerp(this.velocity.y, -2, 0.1);
     }
+    // If more than 0.8m above ground, we're airborne - handled by air physics
   }
 
   initiateJump(speed2D, forward) {
@@ -627,8 +767,10 @@ export class PlayerController {
   }
 
   sampleGroundNormal(pos, RAPIER) {
-    // Sample points along board direction for better terrain following
-    const sampleDist = 0.7;
+    // Sample points along board direction for terrain following
+    // Wider sample for more stable normal at speed
+    const speed2D = Math.sqrt(this.velocity.x ** 2 + this.velocity.z ** 2);
+    const sampleDist = THREE.MathUtils.lerp(0.6, 1.2, Math.min(speed2D / 25, 1));
 
     // Board-relative offsets
     const cosH = Math.cos(this.heading);
@@ -638,7 +780,7 @@ export class PlayerController {
     const localOffsets = [
       { x: 0, z: sampleDist },   // front of board
       { x: 0, z: -sampleDist },  // back of board
-      { x: sampleDist, z: 0 }    // side
+      { x: sampleDist * 0.7, z: 0 }    // side (narrower)
     ];
 
     const worldOffsets = localOffsets.map(o => ({
@@ -669,9 +811,9 @@ export class PlayerController {
 
       if (normal.y < 0) normal.negate();
 
-      // Speed-adaptive smoothing - faster = smoother to prevent jitter
-      const speed2D = Math.sqrt(this.velocity.x ** 2 + this.velocity.z ** 2);
-      const lerpFactor = THREE.MathUtils.lerp(0.2, 0.1, Math.min(speed2D / 30, 1));
+      // Much smoother normal interpolation - higher speed = slower changes
+      // This prevents the visual jitter from rapid normal changes
+      const lerpFactor = THREE.MathUtils.lerp(0.08, 0.03, Math.min(speed2D / 25, 1));
 
       this.groundNormal.lerp(normal, lerpFactor);
       this.groundNormal.normalize();
