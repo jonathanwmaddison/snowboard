@@ -283,16 +283,27 @@ export class PlayerController {
     if (this.isGrounded) {
       this.airTime = 0;
       this.updateGroundedPhysics(dt, pos);
+
+      // When grounded, directly set Y to ground height (no velocity bounce)
+      const targetY = this.groundHeight + 0.15;
+      const newY = THREE.MathUtils.lerp(pos.y, targetY, 0.3);
+      this.velocity.y = 0; // No vertical velocity when grounded
+
+      this.body.setNextKinematicTranslation({
+        x: pos.x + this.velocity.x * dt,
+        y: newY,
+        z: pos.z + this.velocity.z * dt
+      });
     } else {
       this.updateAirPhysics(dt, pos);
-    }
 
-    // Update physics body position
-    this.body.setNextKinematicTranslation({
-      x: pos.x + this.velocity.x * dt,
-      y: pos.y + this.velocity.y * dt,
-      z: pos.z + this.velocity.z * dt
-    });
+      // In air, use velocity
+      this.body.setNextKinematicTranslation({
+        x: pos.x + this.velocity.x * dt,
+        y: pos.y + this.velocity.y * dt,
+        z: pos.z + this.velocity.z * dt
+      });
+    }
 
     // Calculate speed
     this.currentSpeed = Math.sqrt(
@@ -527,12 +538,10 @@ export class PlayerController {
       this.velocity.z *= scale;
     }
 
-    // === GROUND FOLLOWING ===
-    this.updateGroundFollowing(pos, speed2D, dt);
-
     // === JUMP ===
     if (this.input.jump) {
       this.initiateJump(speed2D, forward);
+      this.isGrounded = false; // Immediately become airborne
     }
 
     // Reset air rotation when grounded
@@ -543,21 +552,6 @@ export class PlayerController {
 
     // Store spin momentum for jumps
     this.spinVelocity = this.headingVelocity * 0.3;
-  }
-
-  updateGroundFollowing(pos, speed2D, dt) {
-    const targetY = this.groundHeight + 0.15;
-    const yDiff = targetY - pos.y;
-
-    // Direct, responsive ground following
-    if (yDiff > 0) {
-      // Below ground - push up firmly
-      this.velocity.y = yDiff * 15;
-    } else if (yDiff > -0.3) {
-      // Slightly above - gentle downward
-      this.velocity.y = yDiff * 8;
-    }
-    // More than 0.3m above = becoming airborne, let air physics handle
   }
 
   initiateJump(speed2D, forward) {
@@ -739,8 +733,8 @@ export class PlayerController {
 
       if (normal.y < 0) normal.negate();
 
-      // Responsive normal following
-      this.groundNormal.lerp(normal, 0.15);
+      // Smooth normal following to prevent visual jitter
+      this.groundNormal.lerp(normal, 0.08);
       this.groundNormal.normalize();
     }
   }
