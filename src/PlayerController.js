@@ -418,102 +418,49 @@ export class PlayerController {
       Math.sin(this.heading)
     );
 
-    // === WEIGHT TRANSFER SIMULATION ===
-    // Weight shifts based on input and current motion
-    const targetWeightForward = this.input.lean * 0.8;
-    const targetWeightSide = this.input.steer * 0.7;
+    // === WEIGHT TRANSFER (simplified) ===
+    this.weightForward = THREE.MathUtils.lerp(this.weightForward, this.input.lean * 0.8, 8 * dt);
 
-    // Weight shifts gradually - heavier feel
-    this.weightForward = THREE.MathUtils.lerp(this.weightForward, targetWeightForward, 6 * dt);
-    this.weightSide = THREE.MathUtils.lerp(this.weightSide, targetWeightSide, 8 * dt);
+    // === EDGE ANGLE - direct and responsive ===
+    const maxEdge = 1.0; // ~57 degrees max
+    this.targetEdgeAngle = this.input.steer * maxEdge;
 
-    // === EDGE ANGLE FROM WEIGHT AND INPUT ===
-    // Edge angle is combination of direct input and body position
-    const maxEdge = 1.1; // ~63 degrees max
-    const inputEdge = this.input.steer * maxEdge;
-    const weightEdgeInfluence = this.weightSide * 0.2; // Weight adds subtle edge
-
-    this.targetEdgeAngle = inputEdge + weightEdgeInfluence;
-
-    // Edge transition - faster when unweighting, slower when pressuring
-    const unweighting = Math.abs(this.input.lean) > 0.3 && this.input.lean < 0;
-    const edgeChanging = Math.sign(this.targetEdgeAngle) !== Math.sign(this.edgeAngle);
-
-    let edgeLerpSpeed;
-    if (unweighting && edgeChanging) {
-      edgeLerpSpeed = 22; // Fast edge-to-edge when unweighted
-    } else if (edgeChanging) {
-      edgeLerpSpeed = 14; // Medium when changing edges with weight
-    } else {
-      edgeLerpSpeed = 10; // Slower when holding edge (committed)
-    }
-
+    // Fast edge response
+    const edgeLerpSpeed = 15;
     this.edgeAngle = THREE.MathUtils.lerp(this.edgeAngle, this.targetEdgeAngle, edgeLerpSpeed * dt);
 
     const absEdge = Math.abs(this.edgeAngle);
     const edgeSign = Math.sign(this.edgeAngle);
 
-    // === EFFECTIVE PRESSURE (how much the edge bites) ===
-    // Forward weight = more front edge bite, back weight = more tail control
-    const basePressure = 0.7;
-    const weightPressure = Math.abs(this.weightForward) * 0.15;
-    const edgePressure = absEdge * 0.2; // More edge = more pressure
-
-    // Speed reduces effective pressure (harder to hold edge at speed)
-    const speedPressureLoss = Math.max(0, (speed2D - 20) * 0.008);
-
-    this.effectivePressure = THREE.MathUtils.clamp(
-      basePressure + weightPressure + edgePressure - speedPressureLoss,
-      0.4, 1.0
-    );
+    // === EFFECTIVE PRESSURE (simplified) ===
+    this.effectivePressure = 0.8 + absEdge * 0.2;
 
     // === CARVED TURN PHYSICS ===
-    if (speed2D > 0.3) {
+    if (speed2D > 0.5) {
       let targetAngularVel = 0;
 
-      if (absEdge > 0.03) {
+      if (absEdge > 0.05) {
         // Turn radius from sidecut geometry
         const sinEdge = Math.sin(absEdge);
-        const turnRadius = this.sidecutRadius / Math.max(sinEdge, 0.08);
+        const turnRadius = this.sidecutRadius / Math.max(sinEdge, 0.1);
 
-        // Base angular velocity: v/r
-        const baseAngularVel = speed2D / turnRadius;
+        // Angular velocity: v/r with boost for responsiveness
+        const baseAngularVel = (speed2D / turnRadius) * 1.3;
 
-        // === WEIGHT DISTRIBUTION AFFECTS TURN CHARACTER ===
-        // Forward weight: tighter, more aggressive initiation
-        // Back weight: looser, more drifty, better for speed scrubbing
-        let weightTurnMod = 1.0;
-        if (this.weightForward > 0.2) {
-          // Nose press - tighter turns, quicker initiation
-          weightTurnMod = 1.0 + this.weightForward * 0.4;
-        } else if (this.weightForward < -0.2) {
-          // Tail press - wider turns, more slide
-          weightTurnMod = 1.0 + this.weightForward * 0.2; // Reduces turn rate
-        }
-
-        // Pressure affects how much edge angle translates to turning
-        const pressureEffect = 0.6 + this.effectivePressure * 0.5;
-
-        // Input intensity - progressive response
-        const inputIntensity = Math.pow(Math.abs(this.input.steer), 0.85);
-        const inputBoost = 1 + inputIntensity * 0.5;
-
-        targetAngularVel = baseAngularVel * weightTurnMod * pressureEffect * inputBoost * edgeSign;
+        targetAngularVel = baseAngularVel * edgeSign;
       }
 
-      // Angular velocity smoothing with momentum
-      const angularLerp = absEdge > 0.4 ? 6 : 10; // Deep edge = more committed
-      this.headingVelocity = THREE.MathUtils.lerp(this.headingVelocity, targetAngularVel, angularLerp * dt);
+      // Responsive angular velocity
+      this.headingVelocity = THREE.MathUtils.lerp(this.headingVelocity, targetAngularVel, 10 * dt);
 
-      // Max turn rate - speed dependent
-      const maxAngularVel = THREE.MathUtils.lerp(3.5, 2.5, Math.min(speed2D / 35, 1));
-      this.headingVelocity = THREE.MathUtils.clamp(this.headingVelocity, -maxAngularVel, maxAngularVel);
+      // Clamp max turn rate
+      this.headingVelocity = THREE.MathUtils.clamp(this.headingVelocity, -3.5, 3.5);
 
       this.heading += this.headingVelocity * dt;
     } else {
-      // Slow speed - pivot steering
-      this.headingVelocity *= 0.85;
-      this.heading += this.input.steer * 2.0 * dt;
+      // Slow speed - direct pivot
+      this.headingVelocity *= 0.8;
+      this.heading += this.input.steer * 3.0 * dt;
     }
 
     // === GRAVITY / SLOPE ===
@@ -531,18 +478,10 @@ export class PlayerController {
       this.slipAngle = this.normalizeAngle(velDir - this.heading);
     }
 
-    // === GRIP SYSTEM ===
-    // Base grip + edge bonus - speed penalty - turn stress
-    const baseGrip = 0.6;
-    const edgeGrip = absEdge * this.effectivePressure * 0.4;
-    const speedPenalty = Math.max(0, (speed2D - 12) * 0.006);
-    const turnStress = Math.abs(this.headingVelocity) * speed2D * 0.002;
-
-    // Tail weight reduces grip (more drifty)
-    const weightGripMod = this.weightForward < -0.3 ? Math.abs(this.weightForward) * 0.15 : 0;
-
-    let finalGrip = baseGrip + edgeGrip - speedPenalty - turnStress - weightGripMod;
-    finalGrip = THREE.MathUtils.clamp(finalGrip, 0.35, 0.97);
+    // === GRIP SYSTEM (simplified) ===
+    const baseGrip = 0.7;
+    const edgeGrip = absEdge * 0.25;
+    let finalGrip = THREE.MathUtils.clamp(baseGrip + edgeGrip, 0.5, 0.95);
 
     // Apply grip
     const newLateralSpeed = lateralSpeed * (1 - finalGrip);
@@ -556,9 +495,9 @@ export class PlayerController {
     this.velocity.z += slopeDir.z * gravityAccel * dt;
 
     // === DRAG ===
-    const baseDrag = 0.9985;
-    const carveDrag = absEdge * 0.0015;
-    const slideDrag = Math.abs(this.slipAngle) * 0.004;
+    const baseDrag = 0.999;
+    const carveDrag = absEdge * 0.001;
+    const slideDrag = Math.abs(this.slipAngle) * 0.003;
     const drag = baseDrag - carveDrag - slideDrag;
     this.velocity.x *= drag;
     this.velocity.z *= drag;
@@ -607,27 +546,18 @@ export class PlayerController {
   }
 
   updateGroundFollowing(pos, speed2D, dt) {
-    const targetY = this.groundHeight + 0.12;
+    const targetY = this.groundHeight + 0.15;
     const yDiff = targetY - pos.y;
 
-    // Much smoother ground following - use smooth interpolation
-    // Higher speed = smoother to prevent jitter from terrain detail
-    const smoothFactor = THREE.MathUtils.lerp(0.15, 0.08, Math.min(speed2D / 30, 1));
-
-    if (yDiff > 0.01) {
-      // Below target - smoothly rise
-      // Use smooth interpolation instead of direct velocity assignment
-      const targetVelY = yDiff * 8;
-      this.velocity.y = THREE.MathUtils.lerp(this.velocity.y, targetVelY, smoothFactor);
-    } else if (yDiff > -0.2) {
-      // Near target or slightly above - very gentle correction
-      const targetVelY = yDiff * 5;
-      this.velocity.y = THREE.MathUtils.lerp(this.velocity.y, targetVelY, smoothFactor * 0.5);
-    } else if (yDiff > -0.8) {
-      // Above ground but not airborne - let gravity work
-      this.velocity.y = THREE.MathUtils.lerp(this.velocity.y, -2, 0.1);
+    // Direct, responsive ground following
+    if (yDiff > 0) {
+      // Below ground - push up firmly
+      this.velocity.y = yDiff * 15;
+    } else if (yDiff > -0.3) {
+      // Slightly above - gentle downward
+      this.velocity.y = yDiff * 8;
     }
-    // If more than 0.8m above ground, we're airborne - handled by air physics
+    // More than 0.3m above = becoming airborne, let air physics handle
   }
 
   initiateJump(speed2D, forward) {
@@ -768,9 +698,7 @@ export class PlayerController {
 
   sampleGroundNormal(pos, RAPIER) {
     // Sample points along board direction for terrain following
-    // Wider sample for more stable normal at speed
-    const speed2D = Math.sqrt(this.velocity.x ** 2 + this.velocity.z ** 2);
-    const sampleDist = THREE.MathUtils.lerp(0.6, 1.2, Math.min(speed2D / 25, 1));
+    const sampleDist = 0.8;
 
     // Board-relative offsets
     const cosH = Math.cos(this.heading);
@@ -780,7 +708,7 @@ export class PlayerController {
     const localOffsets = [
       { x: 0, z: sampleDist },   // front of board
       { x: 0, z: -sampleDist },  // back of board
-      { x: sampleDist * 0.7, z: 0 }    // side (narrower)
+      { x: sampleDist, z: 0 }    // side
     ];
 
     const worldOffsets = localOffsets.map(o => ({
@@ -811,11 +739,8 @@ export class PlayerController {
 
       if (normal.y < 0) normal.negate();
 
-      // Much smoother normal interpolation - higher speed = slower changes
-      // This prevents the visual jitter from rapid normal changes
-      const lerpFactor = THREE.MathUtils.lerp(0.08, 0.03, Math.min(speed2D / 25, 1));
-
-      this.groundNormal.lerp(normal, lerpFactor);
+      // Responsive normal following
+      this.groundNormal.lerp(normal, 0.15);
       this.groundNormal.normalize();
     }
   }
