@@ -5,6 +5,10 @@ import { PlayerController } from './PlayerController.js';
 import { CameraController } from './CameraController.js';
 import { UIOverlay } from './UIOverlay.js';
 import { InputHandler } from './InputHandler.js';
+import { CarveMarks } from './CarveMarks.js';
+import { FlowScore } from './FlowScore.js';
+import { FlowUI } from './FlowUI.js';
+import { AudioSystem } from './AudioSystem.js';
 
 class Game {
   constructor() {
@@ -13,8 +17,16 @@ class Game {
     this.terrain = null;
     this.player = null;
     this.cameraController = null;
+    this.carveMarks = null;
     this.ui = null;
     this.input = null;
+
+    // Flow scoring system
+    this.flowScore = null;
+    this.flowUI = null;
+    this.audioSystem = null;
+    this.zenMode = false;
+    this.previousEdgeSide = 0;
 
     this.lastTime = 0;
     this.isRunning = false;
@@ -44,6 +56,18 @@ class Game {
     this.cameraController = new CameraController(this.sceneManager, this.terrain);
     this.cameraController.setInitialPosition(this.player.getPosition());
 
+    // Create carve marks system
+    this.carveMarks = new CarveMarks(this.sceneManager);
+
+    // Create flow scoring system
+    this.flowScore = new FlowScore();
+    this.flowUI = new FlowUI();
+
+    // Create audio system (init on first user interaction)
+    this.audioSystem = new AudioSystem();
+    window.addEventListener('click', () => this.audioSystem.init(), { once: true });
+    window.addEventListener('keydown', () => this.audioSystem.init(), { once: true });
+
     // Create UI
     this.ui = new UIOverlay();
     this.ui.init(() => this.restart());
@@ -54,6 +78,7 @@ class Game {
 
     console.log('Initialization complete!');
     console.log('Controls: A/D to steer, W/S to lean, Space to jump, R to restart');
+    console.log('         Z to toggle Zen Mode');
     console.log('Debug: 1 for wireframe, 2 for colliders');
 
     // Start game loop
@@ -91,10 +116,17 @@ class Game {
       console.log('Colliders:', this.collidersVisible ? 'VISIBLE' : 'HIDDEN');
     });
 
+    this.input.setCallback('toggleZenMode', () => {
+      this.zenMode = !this.zenMode;
+      this.flowUI.setZenMode(this.zenMode);
+      console.log('Zen Mode:', this.zenMode ? 'ON - just carve, no score' : 'OFF');
+    });
+
   }
 
   restart() {
     this.player.reset();
+    this.flowScore.reset();
     console.log('Player reset to start position');
   }
 
@@ -113,6 +145,59 @@ class Game {
 
     // Update player
     this.player.update(deltaTime);
+
+    // Update carve marks
+    this.carveMarks.update(
+      deltaTime,
+      this.player.getPosition(),
+      this.player.getHeading(),
+      this.player.edgeAngle,
+      this.player.currentSpeed,
+      this.player.isGrounded
+    );
+
+    // Get terrain state for flow scoring (terrain resonance)
+    const playerPos = this.player.getPosition();
+    const terrainState = this.terrain.getTerrainState(
+      playerPos.x,
+      playerPos.z,
+      this.player.currentSpeed
+    );
+
+    // Update flow scoring system
+    const playerState = {
+      edgeAngle: this.player.edgeAngle,
+      speed: this.player.currentSpeed,
+      isGrounded: this.player.isGrounded,
+      carveRailStrength: this.player.carveRailStrength,
+      carvePerfection: this.player.carvePerfection,
+      position: playerPos,
+      heading: this.player.heading
+    };
+    this.flowScore.update(deltaTime, playerState, terrainState);
+
+    // Update flow UI
+    const flowDisplayState = this.flowScore.getDisplayState();
+    this.flowUI.update(flowDisplayState);
+
+    // Detect edge transitions for audio
+    const absEdge = Math.abs(this.player.edgeAngle);
+    const currentEdgeSide = absEdge > 0.15 ? Math.sign(this.player.edgeAngle) : 0;
+    const transitioned = currentEdgeSide !== 0 &&
+                         this.previousEdgeSide !== 0 &&
+                         currentEdgeSide !== this.previousEdgeSide;
+    this.previousEdgeSide = currentEdgeSide;
+
+    // Update audio system
+    this.audioSystem.update(deltaTime, {
+      edgeAngle: this.player.edgeAngle,
+      speed: this.player.currentSpeed,
+      isGrounded: this.player.isGrounded,
+      carveRailStrength: this.player.carveRailStrength,
+      flowLevel: flowDisplayState.flowLevel,
+      transitioned: transitioned,
+      terrainSync: terrainState.terrainSync
+    });
 
     // Update camera with additional state for dynamic effects
     this.cameraController.update(

@@ -9,54 +9,118 @@ export class TerrainGenerator {
     this.body = null;
 
     // Mountain parameters
-    this.length = 1400;  // meters (z-axis, downhill)
-    this.width = 400;    // meters (x-axis)
-    this.segmentsX = 250;
-    this.segmentsZ = 700;
+    this.length = 1000;  // meters downhill
+    this.width = 200;    // meters wide
+    this.segmentsX = 200;
+    this.segmentsZ = 500;
 
     // Noise generators
-    this.terrainNoise = new SimplexNoise(12345);
+    this.noise = new SimplexNoise(12345);
     this.detailNoise = new SimplexNoise(67890);
-    this.mogulNoise = new SimplexNoise(11111);
-    this.groomNoise = new SimplexNoise(22222);
 
     // Mountain profile
-    this.peakHeight = 450;
-    this.baseHeight = 0;
+    this.peakHeight = 300;
 
-    // Define ski trails
-    this.trails = this.defineTrails();
+    // Trail parameters
+    this.trailWidth = 40;
+
+    // === TERRAIN FEATURES for carve gameplay ===
+    // These create rhythm opportunities and scoring zones
+    this.features = [];
+    this.generateFeatures();
   }
 
-  defineTrails() {
-    // Single main trail that weaves down the mountain
-    return [
-      {
-        name: 'Main Run',
-        difficulty: 'blue',
-        color: 0x0066ff,
-        groomed: true,
-        width: 45,
-        // Trail weaves left and right down the mountain
-        path: [
-          [0, -this.length/2 + 30],
-          [40, -this.length/2 + 120],
-          [60, -this.length/2 + 220],
-          [30, -this.length/2 + 320],
-          [-20, -this.length/2 + 420],
-          [-50, -this.length/2 + 520],
-          [-40, -this.length/2 + 620],
-          [0, -this.length/2 + 720],
-          [50, -this.length/2 + 820],
-          [70, -this.length/2 + 920],
-          [40, -this.length/2 + 1020],
-          [-10, -this.length/2 + 1120],
-          [-40, -this.length/2 + 1220],
-          [-20, -this.length/2 + 1320],
-          [0, this.length/2 - 50]
-        ]
+  /**
+   * Generate terrain features that reward carving
+   */
+  generateFeatures() {
+    this.features = [];
+
+    // Feature placement along the trail
+    const featureSpacing = 60; // Average spacing between features
+    let z = -this.length / 2 + 100; // Start after initial section
+
+    while (z < this.length / 2 - 100) {
+      const trailX = this.getTrailCenterX(z);
+
+      // Randomize spacing
+      const spacing = featureSpacing * (0.7 + Math.random() * 0.6);
+
+      // Choose feature type based on position and randomness
+      const rand = Math.random();
+      let feature;
+
+      if (rand < 0.35) {
+        // ROLLER - Undulation that syncs with carve rhythm
+        feature = {
+          type: 'roller',
+          x: trailX,
+          z: z,
+          width: 30 + Math.random() * 15,
+          length: 15 + Math.random() * 10,
+          height: 1.5 + Math.random() * 1.5,
+          // Optimal carve transition at the peak
+          peakZ: z
+        };
+      } else if (rand < 0.6) {
+        // BANK - Natural wall for carving into
+        const side = Math.random() > 0.5 ? 1 : -1;
+        feature = {
+          type: 'bank',
+          x: trailX + side * (this.trailWidth * 0.3),
+          z: z,
+          side: side,
+          width: 12 + Math.random() * 8,
+          length: 25 + Math.random() * 15,
+          height: 2 + Math.random() * 2,
+          angle: 0.3 + Math.random() * 0.3 // Bank angle in radians
+        };
+      } else if (rand < 0.8) {
+        // COMPRESSION ZONE - Dip that amplifies G-forces
+        feature = {
+          type: 'compression',
+          x: trailX,
+          z: z,
+          width: 25 + Math.random() * 10,
+          length: 20 + Math.random() * 10,
+          depth: 1 + Math.random() * 1.5
+        };
+      } else {
+        // TERRAIN WAVE - Series of gentle undulations
+        feature = {
+          type: 'wave',
+          x: trailX,
+          z: z,
+          width: 35,
+          length: 40 + Math.random() * 20,
+          amplitude: 0.8 + Math.random() * 0.6,
+          frequency: 3 + Math.floor(Math.random() * 2) // Number of waves
+        };
       }
-    ];
+
+      this.features.push(feature);
+      z += spacing;
+    }
+  }
+
+  // Get the X position of the trail center at a given Z
+  getTrailCenterX(z) {
+    // Trail weaves left and right using sine waves
+    const t = (z + this.length / 2) / this.length; // 0 to 1 down the mountain
+
+    // Combine multiple sine waves for interesting path
+    const wave1 = Math.sin(t * Math.PI * 4) * 35;      // 2 full S-curves
+    const wave2 = Math.sin(t * Math.PI * 2 + 1) * 20;  // Longer wave
+    const wave3 = Math.sin(t * Math.PI * 7) * 10;      // Quick wiggles
+
+    return wave1 + wave2 + wave3 * (1 - t); // Less wiggle at bottom
+  }
+
+  // Get distance from trail center (0 = center, 1 = edge, >1 = off trail)
+  getTrailDistance(x, z) {
+    const trailX = this.getTrailCenterX(z);
+    const distFromCenter = Math.abs(x - trailX);
+    return distFromCenter / (this.trailWidth / 2);
   }
 
   generate() {
@@ -72,9 +136,6 @@ export class TerrainGenerator {
     const positions = geometry.attributes.position;
     const colors = new Float32Array(positions.count * 3);
 
-    // Pre-compute trail splines for smooth interpolation
-    this.trailSplines = this.trails.map(trail => this.createTrailSpline(trail.path));
-
     // Generate terrain
     for (let i = 0; i < positions.count; i++) {
       const x = positions.getX(i);
@@ -83,7 +144,7 @@ export class TerrainGenerator {
       const height = this.calculateHeight(x, z);
       positions.setY(i, height);
 
-      const color = this.getTerrainColor(x, z, height);
+      const color = this.getTerrainColor(x, z);
       colors[i * 3] = color.r;
       colors[i * 3 + 1] = color.g;
       colors[i * 3 + 2] = color.b;
@@ -96,7 +157,6 @@ export class TerrainGenerator {
       vertexColors: true,
       roughness: 0.85,
       metalness: 0.0,
-      flatShading: false,
     });
 
     this.mesh = new THREE.Mesh(geometry, material);
@@ -104,195 +164,173 @@ export class TerrainGenerator {
     this.mesh.castShadow = true;
     this.sceneManager.add(this.mesh);
 
-    // Add resort features
-    this.addTrailSigns();
-    this.addTrailBoundaries();
+    // Add trees on sides
     this.addTrees();
-    this.addRocks();
-    this.addLiftTowers();
+
+    // Add trail markers
+    this.addTrailMarkers();
 
     this.createPhysicsCollider(geometry);
 
-    const startZ = -this.length / 2 + 50;
-    const startY = this.calculateHeight(0, startZ) + 2;
+    // Spawn on trail
+    const startZ = -this.length / 2 + 30;
+    const startX = this.getTrailCenterX(startZ);
+    const startY = this.calculateHeight(startX, startZ) + 2;
 
     return {
-      startPosition: { x: 0, y: startY, z: startZ },
+      startPosition: { x: startX, y: startY, z: startZ },
       length: this.length,
       width: this.width
     };
   }
 
-  createTrailSpline(pathPoints) {
-    // Create smooth spline through trail control points
-    const points = pathPoints.map(p => new THREE.Vector2(p[0], p[1]));
-    return new THREE.SplineCurve(points);
-  }
-
-  getTrailInfo(x, z) {
-    // Find which trail(s) this point is on and how centered
-    let bestTrail = null;
-    let bestDistance = Infinity;
-    let onTrail = false;
-
-    for (let i = 0; i < this.trails.length; i++) {
-      const trail = this.trails[i];
-      const spline = this.trailSplines[i];
-
-      // Sample spline to find closest point
-      const samples = 50;
-      for (let t = 0; t <= 1; t += 1/samples) {
-        const point = spline.getPoint(t);
-        const dist = Math.sqrt((x - point.x) ** 2 + (z - point.y) ** 2);
-
-        if (dist < bestDistance) {
-          bestDistance = dist;
-          bestTrail = trail;
-        }
-      }
-    }
-
-    if (bestTrail && bestDistance < bestTrail.width) {
-      onTrail = true;
-    }
-
-    return {
-      trail: bestTrail,
-      distance: bestDistance,
-      onTrail: onTrail,
-      centeredness: bestTrail ? Math.max(0, 1 - bestDistance / bestTrail.width) : 0
-    };
-  }
-
   calculateHeight(x, z) {
-    const normalizedZ = (z + this.length / 2) / this.length;
-    const normalizedX = x / (this.width / 2);
+    // Normalized position down the mountain (0 = top, 1 = bottom)
+    const t = (z + this.length / 2) / this.length;
 
-    // Base mountain slope
-    const slopeProfile = this.getSlopeProfile(normalizedZ);
-    let baseHeight = this.peakHeight * (1 - slopeProfile);
-
-    // Mountain structure
-    const ridgeScale = 0.002;
-    const ridges = this.terrainNoise.ridgeNoise(x * ridgeScale, z * ridgeScale, 4, 2.0, 0.5);
-    const valleys = this.terrainNoise.fbm(x * 0.006, z * 0.004, 5, 2.0, 0.55);
-
-    // Edge falloff
-    const edgeDistance = Math.abs(normalizedX);
-    let edgeProfile = 0;
-    if (edgeDistance > 0.7) {
-      edgeProfile = Math.pow((edgeDistance - 0.7) / 0.3, 2) * 200;
-    }
-
-    let height = baseHeight;
-    height += ridges * 50;
-    height += valleys * 25;
-    height -= edgeProfile;
-
-    // Get trail information
-    const trailInfo = this.getTrailInfo(x, z);
-
-    if (trailInfo.onTrail && trailInfo.trail) {
-      const trail = trailInfo.trail;
-      const centeredness = trailInfo.centeredness;
-
-      // Smooth trail surface - reduce natural terrain variation
-      const smoothFactor = centeredness * 0.8;
-
-      // Groomed trails are smoother with visible corduroy
-      if (trail.groomed) {
-        // Strong corduroy grooming pattern - visible parallel ridges across the trail
-        // Multiple frequencies for realistic groomer pattern
-        const groomFreq1 = Math.sin(z * 8.0) * 0.12;  // Main corduroy ridges
-        const groomFreq2 = Math.sin(z * 16.0) * 0.04; // Fine detail
-        const groomPattern = (groomFreq1 + groomFreq2) * centeredness;
-        height += groomPattern;
-
-        // Groomed trails are much flatter - remove natural bumps
-        // Only add minimal terrain variation
-        const roughTerrain = this.detailNoise.fbm(x * 0.02, z * 0.015, 3, 2.0, 0.5) * 3;
-        height += roughTerrain * (1 - smoothFactor * 0.9);
-
-        // Slight cross-slope for drainage (edges slightly higher)
-        const crossSlope = Math.pow(1 - centeredness, 2) * 0.5;
-        height += crossSlope;
-      } else {
-        // Ungroomed = mogul field
-        const mogulSize = trail.difficulty === 'double-black' ? 4.5 : 3.5;
-        const mogulDensity = trail.difficulty === 'double-black' ? 0.15 : 0.12;
-        const moguls = this.mogulNoise.fbm(x * mogulDensity, z * mogulDensity * 0.7, 3, 2.0, 0.6);
-        height += moguls * mogulSize * centeredness;
-      }
-
-      // Trail banking - slightly raised edges for containment
-      const edgeFactor = 1 - centeredness;
-      height += edgeFactor * edgeFactor * 2;
-
-      // Terrain park features
-      if (trail.isTerrainPark) {
-        height += this.addTerrainParkFeatures(x, z, trail, centeredness);
-      }
-
-      // Difficulty affects steepness
-      if (trail.difficulty === 'green') {
-        // Gentler slope for beginners
-        height += normalizedZ * 30;
-      } else if (trail.difficulty === 'black' || trail.difficulty === 'double-black') {
-        // Steeper for experts
-        height -= normalizedZ * 20;
-      }
+    // === BASE SLOPE ===
+    // Mountain goes from peakHeight at top to 0 at bottom
+    // Variable steepness for interest
+    let baseHeight;
+    if (t < 0.1) {
+      // Gentle start
+      baseHeight = this.peakHeight * (1 - t * 2);
+    } else if (t < 0.4) {
+      // Steeper section
+      baseHeight = this.peakHeight * (0.8 - (t - 0.1) * 1.5);
+    } else if (t < 0.7) {
+      // Medium slope
+      baseHeight = this.peakHeight * (0.35 - (t - 0.4) * 0.8);
     } else {
-      // Off-piste terrain - natural snow with some features
-      const naturalBumps = this.detailNoise.fbm(x * 0.025, z * 0.02, 4, 2.0, 0.5);
-      height += naturalBumps * 10;
+      // Runout
+      baseHeight = this.peakHeight * (0.11 - (t - 0.7) * 0.35);
+    }
 
-      // Wind-blown features
-      const windDrift = this.terrainNoise.noise2D(x * 0.01, z * 0.008);
-      if (windDrift > 0.5) {
-        height += (windDrift - 0.5) * 15;
+    // === TRAIL DETECTION ===
+    const trailDist = this.getTrailDistance(x, z);
+    const onTrail = trailDist < 1.0;
+    const trailBlend = Math.max(0, 1 - trailDist); // 1 at center, 0 at edge
+
+    // === OFF-TRAIL TERRAIN ===
+    // Bumpy natural terrain off the trail
+    let offTrailHeight = 0;
+    if (!onTrail) {
+      // Large rolling hills
+      offTrailHeight += this.noise.fbm(x * 0.01, z * 0.008, 4, 2.0, 0.5) * 15;
+      // Medium bumps
+      offTrailHeight += this.detailNoise.fbm(x * 0.03, z * 0.025, 3, 2.0, 0.5) * 5;
+      // Small rough texture
+      offTrailHeight += this.noise.noise2D(x * 0.1, z * 0.08) * 2;
+
+      // Raise edges of mountain
+      const edgeDist = Math.abs(x) / (this.width / 2);
+      if (edgeDist > 0.6) {
+        offTrailHeight += Math.pow((edgeDist - 0.6) / 0.4, 2) * 40;
       }
     }
 
-    // Fine snow texture everywhere
-    height += this.detailNoise.noise2D(x * 0.4, z * 0.3) * 0.15;
+    // === ON-TRAIL TERRAIN ===
+    let trailHeight = 0;
+    if (onTrail) {
+      // Trail is carved INTO the mountain (lower than surroundings)
+      const carveDepth = 3 * trailBlend;
+      trailHeight -= carveDepth;
+
+      // Groomed corduroy pattern
+      const corduroy = Math.sin(z * 6) * 0.08 * trailBlend;
+      trailHeight += corduroy;
+
+      // Very subtle variation
+      trailHeight += this.detailNoise.noise2D(x * 0.05, z * 0.04) * 0.3 * (1 - trailBlend);
+
+      // Banked edges - trail edges are slightly raised
+      const bankHeight = Math.pow(1 - trailBlend, 2) * 1.5;
+      trailHeight += bankHeight;
+
+      // === ADD TERRAIN FEATURES ===
+      trailHeight += this.getFeatureHeight(x, z, trailBlend);
+    }
+
+    // === BLEND TRAIL AND OFF-TRAIL ===
+    let height = baseHeight;
+    if (onTrail) {
+      height += trailHeight;
+    } else {
+      height += offTrailHeight;
+      // Smooth transition at trail edge
+      if (trailDist < 1.5) {
+        const edgeBlend = (trailDist - 1.0) / 0.5;
+        height = THREE.MathUtils.lerp(baseHeight + trailHeight, height, edgeBlend);
+      }
+    }
 
     return height;
   }
 
-  addTerrainParkFeatures(x, z, trail, centeredness) {
+  /**
+   * Calculate height contribution from terrain features
+   */
+  getFeatureHeight(x, z, trailBlend) {
     let featureHeight = 0;
 
-    // Define park features along the trail
-    const features = [
-      { z: -this.length/2 + 280, type: 'jump', size: 3 },
-      { z: -this.length/2 + 400, type: 'rail', size: 0.5 },
-      { z: -this.length/2 + 500, type: 'jump', size: 4 },
-      { z: -this.length/2 + 620, type: 'box', size: 0.8 },
-      { z: -this.length/2 + 720, type: 'jump', size: 5 },
-      { z: -this.length/2 + 850, type: 'halfpipe', size: 4 },
-    ];
-
-    for (const feature of features) {
+    for (const feature of this.features) {
+      const dx = x - feature.x;
       const dz = z - feature.z;
 
-      if (feature.type === 'jump' && Math.abs(dz) < 20) {
-        // Kicker ramp
-        const t = (dz + 20) / 40;
-        if (t > 0.3 && t < 0.7) {
-          const rampT = (t - 0.3) / 0.4;
-          featureHeight += Math.sin(rampT * Math.PI * 0.5) * feature.size * centeredness;
-        } else if (t >= 0.7) {
-          // Landing slope
-          const landT = (t - 0.7) / 0.3;
-          featureHeight += (1 - landT) * feature.size * 0.3 * centeredness;
+      switch (feature.type) {
+        case 'roller': {
+          // Smooth bump - sine wave shape
+          const distZ = Math.abs(dz) / (feature.length / 2);
+          const distX = Math.abs(dx) / (feature.width / 2);
+          if (distZ < 1 && distX < 1) {
+            // Smooth falloff on both axes
+            const falloffZ = Math.cos(distZ * Math.PI / 2);
+            const falloffX = Math.cos(distX * Math.PI / 2);
+            const intensity = falloffZ * falloffX * trailBlend;
+            featureHeight += feature.height * intensity;
+          }
+          break;
         }
-      } else if (feature.type === 'halfpipe' && Math.abs(dz) < 40) {
-        // Halfpipe walls
-        const pipeWidth = 12;
-        const distFromCenter = Math.abs(x - 50); // Approximate trail center
-        if (distFromCenter < pipeWidth) {
-          const wallHeight = Math.pow(distFromCenter / pipeWidth, 2) * feature.size;
-          featureHeight += wallHeight * centeredness;
+
+        case 'bank': {
+          // Angled wall on one side of trail
+          const distZ = Math.abs(dz) / (feature.length / 2);
+          const sideMatch = Math.sign(dx) === feature.side;
+          const distFromEdge = Math.abs(dx) / (feature.width / 2);
+
+          if (distZ < 1 && sideMatch && distFromEdge < 1) {
+            const falloffZ = Math.cos(distZ * Math.PI / 2);
+            // Bank rises toward the side
+            const bankRise = (1 - distFromEdge) * feature.height;
+            featureHeight += bankRise * falloffZ * trailBlend;
+          }
+          break;
+        }
+
+        case 'compression': {
+          // Dip in terrain
+          const distZ = Math.abs(dz) / (feature.length / 2);
+          const distX = Math.abs(dx) / (feature.width / 2);
+          if (distZ < 1 && distX < 1) {
+            const falloffZ = Math.cos(distZ * Math.PI / 2);
+            const falloffX = Math.cos(distX * Math.PI / 2);
+            const intensity = falloffZ * falloffX * trailBlend;
+            featureHeight -= feature.depth * intensity;
+          }
+          break;
+        }
+
+        case 'wave': {
+          // Series of gentle undulations
+          const distZ = (dz + feature.length / 2) / feature.length; // 0-1 along wave
+          const distX = Math.abs(dx) / (feature.width / 2);
+          if (distZ >= 0 && distZ <= 1 && distX < 1) {
+            const wavePhase = distZ * feature.frequency * Math.PI * 2;
+            const falloffX = Math.cos(distX * Math.PI / 2);
+            const waveHeight = Math.sin(wavePhase) * feature.amplitude;
+            featureHeight += waveHeight * falloffX * trailBlend;
+          }
+          break;
         }
       }
     }
@@ -300,411 +338,204 @@ export class TerrainGenerator {
     return featureHeight;
   }
 
-  getSlopeProfile(t) {
-    if (t < 0.08) {
-      return t * 0.4; // Summit plateau
-    } else if (t < 0.25) {
-      return 0.032 + (t - 0.08) * 1.2; // Upper mountain - steep
-    } else if (t < 0.5) {
-      return 0.236 + (t - 0.25) * 0.85; // Mid mountain
-    } else if (t < 0.75) {
-      return 0.4485 + (t - 0.5) * 1.1; // Lower steep section
-    } else {
-      return 0.7235 + (t - 0.75) * 0.6; // Base area - gentle runout
-    }
-  }
+  /**
+   * Get terrain state at position for carve resonance detection
+   * Returns info about nearby features for scoring sync
+   */
+  getTerrainState(x, z, speed) {
+    const state = {
+      terrainSync: 0,        // 0-1, how well position syncs with features
+      nearestFeature: null,
+      featurePhase: 0,       // Where in feature we are (for rhythm)
+      isOnFeature: false,
+      featureType: null
+    };
 
-  getTerrainColor(x, z, height) {
-    const trailInfo = this.getTrailInfo(x, z);
+    // Find nearest relevant feature
+    let nearestDist = Infinity;
+    let nearestFeature = null;
 
-    // Base snow colors
-    const freshSnow = { r: 0.98, g: 0.98, b: 1.0 };
-    const groomedBase = { r: 0.88, g: 0.91, b: 0.96 };      // Base groomed color (slightly blue-gray)
-    const groomedRidge = { r: 0.95, g: 0.96, b: 0.98 };     // Ridge tops (brighter)
-    const groomedValley = { r: 0.82, g: 0.86, b: 0.93 };    // Valleys between ridges (darker)
-    const packedSnow = { r: 0.80, g: 0.82, b: 0.88 };
-    const icySnow = { r: 0.72, g: 0.80, b: 0.90 };
-    const shadowSnow = { r: 0.70, g: 0.75, b: 0.88 };
+    for (const feature of this.features) {
+      const dz = z - feature.z;
+      const dx = x - feature.x;
 
-    let color = { ...freshSnow };
+      // Check if we're in or near this feature
+      const featureHalfLength = (feature.length || 20) / 2;
+      const featureHalfWidth = (feature.width || 30) / 2;
 
-    if (trailInfo.onTrail && trailInfo.trail) {
-      const trail = trailInfo.trail;
-      const centeredness = trailInfo.centeredness;
-
-      if (trail.groomed) {
-        // Groomed trail - very visible corduroy stripes
-        // Use sine wave to create alternating light/dark stripes
-        const corduroySine = Math.sin(z * 8.0);
-        const corduroyPattern = (corduroySine + 1) * 0.5; // 0 to 1
-
-        // Blend between valley (dark) and ridge (light) colors
-        const baseColor = {
-          r: THREE.MathUtils.lerp(groomedValley.r, groomedRidge.r, corduroyPattern),
-          g: THREE.MathUtils.lerp(groomedValley.g, groomedRidge.g, corduroyPattern),
-          b: THREE.MathUtils.lerp(groomedValley.b, groomedRidge.b, corduroyPattern)
-        };
-
-        // Apply centeredness - more visible corduroy pattern toward center
-        color.r = THREE.MathUtils.lerp(freshSnow.r, baseColor.r, centeredness * 0.9);
-        color.g = THREE.MathUtils.lerp(freshSnow.g, baseColor.g, centeredness * 0.9);
-        color.b = THREE.MathUtils.lerp(freshSnow.b, baseColor.b, centeredness * 0.9);
-
-        // Add subtle sparkle on ridge tops (sun catching the grooves)
-        if (corduroySine > 0.7) {
-          const sparkle = (corduroySine - 0.7) * 0.15 * centeredness;
-          color.r = Math.min(1, color.r + sparkle);
-          color.g = Math.min(1, color.g + sparkle);
-          color.b = Math.min(1, color.b + sparkle * 0.5);
-        }
-      } else {
-        // Mogul field - bumpy, icy, packed appearance
-        const mogulShading = this.mogulNoise.noise2D(x * 0.12, z * 0.08);
-        const mogulColor = mogulShading > 0 ? packedSnow : icySnow;
-        const mogulBlend = Math.abs(mogulShading) * 0.5 + 0.3;
-
-        color.r = THREE.MathUtils.lerp(freshSnow.r, mogulColor.r, centeredness * mogulBlend);
-        color.g = THREE.MathUtils.lerp(freshSnow.g, mogulColor.g, centeredness * mogulBlend);
-        color.b = THREE.MathUtils.lerp(freshSnow.b, mogulColor.b, centeredness * mogulBlend);
-
-        // Icy highlights on mogul tops
-        if (mogulShading > 0.4) {
-          color.r -= 0.05;
-          color.b += 0.03;
+      if (Math.abs(dz) < featureHalfLength * 1.5 && Math.abs(dx) < featureHalfWidth * 1.5) {
+        const dist = Math.sqrt(dz * dz + dx * dx);
+        if (dist < nearestDist) {
+          nearestDist = dist;
+          nearestFeature = feature;
         }
       }
-
-      // Terrain park has slightly different color (more worked snow)
-      if (trail.isTerrainPark) {
-        color.r -= 0.04;
-        color.g -= 0.02;
-        color.b += 0.02;
-      }
     }
 
-    // Slope-based shading
-    const dx = this.calculateHeight(x + 1, z) - this.calculateHeight(x - 1, z);
-    const dz = this.calculateHeight(x, z + 1) - this.calculateHeight(x, z - 1);
-    const slope = Math.sqrt(dx * dx + dz * dz);
+    if (nearestFeature) {
+      state.nearestFeature = nearestFeature;
+      state.featureType = nearestFeature.type;
 
-    // Shadow on north-facing slopes
-    const shadowBlend = Math.max(0, Math.min(1, (dx + 0.8) * 0.4));
-    color.r = THREE.MathUtils.lerp(shadowSnow.r, color.r, shadowBlend);
-    color.g = THREE.MathUtils.lerp(shadowSnow.g, color.g, shadowBlend);
-    color.b = THREE.MathUtils.lerp(shadowSnow.b, color.b, shadowBlend);
+      const dz = z - nearestFeature.z;
+      const featureLength = nearestFeature.length || 20;
 
-    // Icy on steep slopes
-    if (slope > 1.8) {
-      const iceBlend = Math.min(1, (slope - 1.8) * 0.4);
-      color.r = THREE.MathUtils.lerp(color.r, icySnow.r, iceBlend);
-      color.g = THREE.MathUtils.lerp(color.g, icySnow.g, iceBlend);
-      color.b = THREE.MathUtils.lerp(color.b, icySnow.b, iceBlend);
-    }
+      // Calculate phase within feature (0 = entry, 0.5 = peak, 1 = exit)
+      state.featurePhase = (dz / featureLength) + 0.5;
+      state.featurePhase = Math.max(0, Math.min(1, state.featurePhase));
 
-    // Subtle noise variation
-    const variation = this.detailNoise.noise2D(x * 0.08, z * 0.08) * 0.025;
-    color.r = Math.max(0, Math.min(1, color.r + variation));
-    color.g = Math.max(0, Math.min(1, color.g + variation));
-    color.b = Math.max(0, Math.min(1, color.b + variation));
+      state.isOnFeature = state.featurePhase > 0.1 && state.featurePhase < 0.9;
 
-    return color;
-  }
+      // === TERRAIN SYNC SCORING ===
+      // Different features have different "sync points"
+      switch (nearestFeature.type) {
+        case 'roller':
+          // Peak of roller is ideal transition point
+          // Sync is highest at peak (phase ~0.5)
+          const peakDist = Math.abs(state.featurePhase - 0.5);
+          state.terrainSync = Math.max(0, 1 - peakDist * 4);
+          break;
 
-  addTrailSigns() {
-    const signGroup = new THREE.Group();
-
-    for (const trail of this.trails) {
-      // Sign at trail start
-      const startPoint = trail.path[0];
-      this.createTrailSign(signGroup, trail, startPoint[0], startPoint[1]);
-
-      // Additional signs along the trail
-      if (trail.path.length > 3) {
-        const midIdx = Math.floor(trail.path.length / 2);
-        const midPoint = trail.path[midIdx];
-        this.createTrailSign(signGroup, trail, midPoint[0] + 15, midPoint[1]);
-      }
-    }
-
-    this.sceneManager.add(signGroup);
-  }
-
-  createTrailSign(group, trail, x, z) {
-    const height = this.calculateHeight(x, z);
-
-    // Sign post
-    const postGeo = new THREE.CylinderGeometry(0.08, 0.08, 3, 8);
-    const postMat = new THREE.MeshStandardMaterial({ color: 0x4a3728 });
-    const post = new THREE.Mesh(postGeo, postMat);
-    post.position.set(x, height + 1.5, z);
-    post.castShadow = true;
-    group.add(post);
-
-    // Sign board
-    const signGeo = new THREE.BoxGeometry(1.5, 0.8, 0.1);
-
-    // Difficulty symbol colors
-    let signColor;
-    switch(trail.difficulty) {
-      case 'green': signColor = 0x00aa44; break;
-      case 'blue': signColor = 0x0066dd; break;
-      case 'black': signColor = 0x111111; break;
-      case 'double-black': signColor = 0x111111; break;
-      default: signColor = 0x666666;
-    }
-
-    // Orange for terrain park
-    if (trail.isTerrainPark) signColor = 0xff6600;
-
-    const signMat = new THREE.MeshStandardMaterial({ color: signColor });
-    const sign = new THREE.Mesh(signGeo, signMat);
-    sign.position.set(x, height + 2.8, z);
-    sign.castShadow = true;
-    group.add(sign);
-
-    // Difficulty symbol on sign
-    let symbolGeo;
-    const symbolMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
-
-    if (trail.difficulty === 'green') {
-      symbolGeo = new THREE.CircleGeometry(0.15, 16);
-    } else if (trail.difficulty === 'blue') {
-      symbolGeo = new THREE.BoxGeometry(0.25, 0.25, 0.02);
-    } else if (trail.difficulty === 'black') {
-      symbolGeo = new THREE.BufferGeometry();
-      const vertices = new Float32Array([
-        0, 0.2, 0.06,
-        -0.17, -0.1, 0.06,
-        0.17, -0.1, 0.06
-      ]);
-      symbolGeo.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
-    } else if (trail.difficulty === 'double-black') {
-      // Two diamonds
-      symbolGeo = new THREE.BoxGeometry(0.15, 0.15, 0.02);
-    }
-
-    if (symbolGeo) {
-      const symbol = new THREE.Mesh(symbolGeo, symbolMat);
-      symbol.position.set(x - 0.4, height + 2.8, z + 0.06);
-      if (trail.difficulty === 'blue') {
-        symbol.rotation.z = Math.PI / 4; // Diamond orientation
-      }
-      group.add(symbol);
-
-      // Second diamond for double-black
-      if (trail.difficulty === 'double-black') {
-        const symbol2 = new THREE.Mesh(symbolGeo.clone(), symbolMat);
-        symbol2.position.set(x - 0.15, height + 2.8, z + 0.06);
-        symbol2.rotation.z = Math.PI / 4;
-        group.add(symbol2);
-      }
-    }
-  }
-
-  addTrailBoundaries() {
-    const boundaryGroup = new THREE.Group();
-
-    // Orange boundary poles along trail edges
-    const poleGeo = new THREE.CylinderGeometry(0.05, 0.05, 1.5, 6);
-    const poleMat = new THREE.MeshStandardMaterial({ color: 0xff6600 });
-
-    // Safety netting posts (taller, with "netting")
-    const netPostGeo = new THREE.CylinderGeometry(0.08, 0.08, 2.5, 6);
-    const netPostMat = new THREE.MeshStandardMaterial({ color: 0xff4400 });
-
-    for (const trail of this.trails) {
-      const spline = this.trailSplines[this.trails.indexOf(trail)];
-
-      // Place poles along trail edges
-      for (let t = 0; t < 1; t += 0.05) {
-        const point = spline.getPoint(t);
-        const tangent = spline.getTangent(t);
-
-        // Perpendicular direction
-        const perpX = -tangent.y;
-        const perpZ = tangent.x;
-
-        // Left boundary
-        const leftX = point.x - perpX * trail.width * 0.5;
-        const leftZ = point.y - perpZ * trail.width * 0.5;
-        const leftHeight = this.calculateHeight(leftX, leftZ);
-
-        const leftPole = new THREE.Mesh(poleGeo, poleMat);
-        leftPole.position.set(leftX, leftHeight + 0.75, leftZ);
-        boundaryGroup.add(leftPole);
-
-        // Right boundary
-        const rightX = point.x + perpX * trail.width * 0.5;
-        const rightZ = point.y + perpZ * trail.width * 0.5;
-        const rightHeight = this.calculateHeight(rightX, rightZ);
-
-        const rightPole = new THREE.Mesh(poleGeo, poleMat);
-        rightPole.position.set(rightX, rightHeight + 0.75, rightZ);
-        boundaryGroup.add(rightPole);
-      }
-
-      // Safety netting at dangerous spots (trail edges near trees/rocks)
-      if (trail.difficulty === 'black' || trail.difficulty === 'double-black') {
-        for (let t = 0.2; t < 0.8; t += 0.1) {
-          const point = spline.getPoint(t);
-          const tangent = spline.getTangent(t);
-          const perpX = -tangent.y;
-          const perpZ = tangent.x;
-
-          // Net posts on both sides
-          for (const side of [-1, 1]) {
-            const netX = point.x + perpX * trail.width * 0.6 * side;
-            const netZ = point.y + perpZ * trail.width * 0.6 * side;
-            const netHeight = this.calculateHeight(netX, netZ);
-
-            const netPost = new THREE.Mesh(netPostGeo, netPostMat);
-            netPost.position.set(netX, netHeight + 1.25, netZ);
-            boundaryGroup.add(netPost);
+        case 'bank':
+          // Entry to bank (phase 0.2-0.4) is ideal for committing to edge
+          if (state.featurePhase > 0.2 && state.featurePhase < 0.5) {
+            state.terrainSync = 1 - Math.abs(state.featurePhase - 0.35) * 5;
           }
-        }
+          break;
+
+        case 'compression':
+          // Bottom of compression (phase ~0.5) rewards deep edge
+          const compDist = Math.abs(state.featurePhase - 0.5);
+          state.terrainSync = Math.max(0, 1 - compDist * 3) * 0.8;
+          break;
+
+        case 'wave':
+          // Multiple sync points on wave peaks
+          const waveFreq = nearestFeature.frequency || 3;
+          const wavePhase = state.featurePhase * waveFreq;
+          const wavePeak = Math.abs(Math.sin(wavePhase * Math.PI));
+          state.terrainSync = wavePeak * 0.7;
+          break;
       }
+
+      // Speed bonus - faster riding through features is more rewarding
+      const speedBonus = Math.min(1, speed / 25) * 0.3;
+      state.terrainSync = Math.min(1, state.terrainSync + speedBonus);
     }
 
-    this.sceneManager.add(boundaryGroup);
+    return state;
+  }
+
+  getTerrainColor(x, z) {
+    const trailDist = this.getTrailDistance(x, z);
+    const onTrail = trailDist < 1.0;
+    const trailBlend = Math.max(0, 1 - trailDist);
+
+    if (onTrail) {
+      // GROOMED TRAIL - very distinct corduroy pattern
+      const corduroySine = Math.sin(z * 6);
+      const corduroyValue = (corduroySine + 1) * 0.5; // 0 to 1
+
+      // Alternating light and dark stripes
+      const ridgeColor = { r: 0.95, g: 0.96, b: 0.98 };  // Bright
+      const valleyColor = { r: 0.80, g: 0.84, b: 0.92 }; // Darker blue-gray
+
+      const r = THREE.MathUtils.lerp(valleyColor.r, ridgeColor.r, corduroyValue);
+      const g = THREE.MathUtils.lerp(valleyColor.g, ridgeColor.g, corduroyValue);
+      const b = THREE.MathUtils.lerp(valleyColor.b, ridgeColor.b, corduroyValue);
+
+      // Blend with edge color
+      const edgeFade = Math.pow(trailBlend, 0.5);
+      return {
+        r: THREE.MathUtils.lerp(0.9, r, edgeFade),
+        g: THREE.MathUtils.lerp(0.92, g, edgeFade),
+        b: THREE.MathUtils.lerp(0.95, b, edgeFade)
+      };
+    } else {
+      // OFF-TRAIL - fresh powder / natural snow
+      const noise = this.detailNoise.noise2D(x * 0.05, z * 0.04) * 0.05;
+      return {
+        r: 0.96 + noise,
+        g: 0.97 + noise,
+        b: 1.0
+      };
+    }
   }
 
   addTrees() {
     const trunkGeo = new THREE.CylinderGeometry(0.3, 0.5, 4, 6);
     const trunkMat = new THREE.MeshStandardMaterial({ color: 0x3d2817, roughness: 0.9 });
-    const foliageGeo = new THREE.ConeGeometry(3, 8, 8);
-    const foliageMat = new THREE.MeshStandardMaterial({ color: 0x1a3d1a, roughness: 0.8 });
-
-    // Snow-covered foliage variant
-    const snowFoliageMat = new THREE.MeshStandardMaterial({ color: 0x2a4d2a, roughness: 0.8 });
+    const foliageGeo = new THREE.ConeGeometry(2.5, 7, 8);
+    const foliageMat = new THREE.MeshStandardMaterial({ color: 0x1a4d1a, roughness: 0.8 });
 
     const treeGroup = new THREE.Group();
-    const treePositions = [];
-    const spacing = 12;
+    const spacing = 15;
 
-    for (let z = -this.length / 2 + 50; z < this.length / 2 - 50; z += spacing) {
-      for (let x = -this.width / 2 + 15; x < this.width / 2 - 15; x += spacing) {
-        // Check if on any trail
-        const trailInfo = this.getTrailInfo(x, z);
-        if (trailInfo.onTrail) continue;
-
-        // Also keep buffer zone around trails
-        if (trailInfo.distance < trailInfo.trail?.width * 1.3) continue;
+    for (let z = -this.length / 2 + 30; z < this.length / 2 - 30; z += spacing) {
+      for (let x = -this.width / 2 + 10; x < this.width / 2 - 10; x += spacing) {
+        // Only place trees OFF the trail
+        const trailDist = this.getTrailDistance(x, z);
+        if (trailDist < 1.5) continue; // Keep buffer around trail
 
         // Random offset
-        const offsetX = (this.terrainNoise.noise2D(x * 0.1, z * 0.1) - 0.5) * spacing * 0.7;
-        const offsetZ = (this.terrainNoise.noise2D(x * 0.15, z * 0.15) - 0.5) * spacing * 0.7;
+        const ox = (this.noise.noise2D(x * 0.1, z * 0.1) - 0.5) * spacing * 0.6;
+        const oz = (this.noise.noise2D(x * 0.15, z * 0.12) - 0.5) * spacing * 0.6;
+        const treeX = x + ox;
+        const treeZ = z + oz;
 
-        const treeX = x + offsetX;
-        const treeZ = z + offsetZ;
-
-        // Probability
-        const prob = this.detailNoise.noise2D(treeX * 0.04, treeZ * 0.04);
-        if (prob < 0.15) continue;
-
-        if (Math.abs(treeX) > this.width / 2 - 20) continue;
+        // Skip some randomly
+        if (this.detailNoise.noise2D(treeX * 0.05, treeZ * 0.05) < 0.2) continue;
 
         const height = this.calculateHeight(treeX, treeZ);
-        const normalizedHeight = height / this.peakHeight;
-        if (normalizedHeight > 0.9 || normalizedHeight < 0.05) continue;
+        const scale = 0.6 + Math.random() * 0.5;
 
-        treePositions.push({
-          x: treeX,
-          y: height,
-          z: treeZ,
-          scale: 0.6 + Math.random() * 0.7,
-          snowy: Math.random() > 0.6
-        });
+        const tree = new THREE.Group();
+
+        const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+        trunk.scale.setScalar(scale);
+        trunk.position.y = 2 * scale;
+        trunk.castShadow = true;
+        tree.add(trunk);
+
+        const foliage = new THREE.Mesh(foliageGeo, foliageMat);
+        foliage.scale.setScalar(scale);
+        foliage.position.y = 6 * scale;
+        foliage.castShadow = true;
+        tree.add(foliage);
+
+        tree.position.set(treeX, height, treeZ);
+        treeGroup.add(tree);
       }
-    }
-
-    const maxTrees = 600;
-    const treesToPlace = treePositions.slice(0, maxTrees);
-
-    for (const pos of treesToPlace) {
-      const tree = new THREE.Group();
-
-      const trunk = new THREE.Mesh(trunkGeo, trunkMat);
-      trunk.scale.setScalar(pos.scale);
-      trunk.position.y = 2 * pos.scale;
-      trunk.castShadow = true;
-      tree.add(trunk);
-
-      const foliage = new THREE.Mesh(foliageGeo, pos.snowy ? snowFoliageMat : foliageMat);
-      foliage.scale.setScalar(pos.scale);
-      foliage.position.y = 7 * pos.scale;
-      foliage.castShadow = true;
-      tree.add(foliage);
-
-      tree.position.set(pos.x, pos.y, pos.z);
-      treeGroup.add(tree);
     }
 
     this.sceneManager.add(treeGroup);
   }
 
-  addRocks() {
-    const rockGeo1 = new THREE.DodecahedronGeometry(2, 0);
-    const rockGeo2 = new THREE.IcosahedronGeometry(1.5, 0);
-    const rockGeos = [rockGeo1, rockGeo2];
+  addTrailMarkers() {
+    // Orange poles along trail edges
+    const poleGeo = new THREE.CylinderGeometry(0.06, 0.06, 2, 6);
+    const poleMat = new THREE.MeshStandardMaterial({ color: 0xff6600 });
 
-    const rockMat = new THREE.MeshStandardMaterial({
-      color: 0x555555,
-      roughness: 0.95,
-      metalness: 0.1,
-    });
+    const markerGroup = new THREE.Group();
 
-    const rockGroup = new THREE.Group();
+    for (let z = -this.length / 2 + 50; z < this.length / 2 - 50; z += 40) {
+      const trailX = this.getTrailCenterX(z);
 
-    for (let i = 0; i < 150; i++) {
-      const x = (Math.random() - 0.5) * this.width * 0.9;
-      const z = -this.length / 2 + Math.random() * this.length;
+      // Left marker
+      const leftX = trailX - this.trailWidth / 2;
+      const leftHeight = this.calculateHeight(leftX, z);
+      const leftPole = new THREE.Mesh(poleGeo, poleMat);
+      leftPole.position.set(leftX, leftHeight + 1, z);
+      markerGroup.add(leftPole);
 
-      const trailInfo = this.getTrailInfo(x, z);
-      if (trailInfo.onTrail || trailInfo.distance < 20) continue;
-
-      const height = this.calculateHeight(x, z);
-
-      const rock = new THREE.Mesh(
-        rockGeos[Math.floor(Math.random() * rockGeos.length)],
-        rockMat
-      );
-
-      const scale = 0.4 + Math.random() * 1.2;
-      rock.scale.setScalar(scale);
-      rock.position.set(x, height + scale * 0.3, z);
-      rock.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
-      rock.castShadow = true;
-      rockGroup.add(rock);
+      // Right marker
+      const rightX = trailX + this.trailWidth / 2;
+      const rightHeight = this.calculateHeight(rightX, z);
+      const rightPole = new THREE.Mesh(poleGeo, poleMat);
+      rightPole.position.set(rightX, rightHeight + 1, z);
+      markerGroup.add(rightPole);
     }
 
-    this.sceneManager.add(rockGroup);
-  }
-
-  addLiftTowers() {
-    // Ski lift towers along the side of the mountain
-    const towerGroup = new THREE.Group();
-
-    const towerGeo = new THREE.BoxGeometry(0.8, 12, 0.8);
-    const towerMat = new THREE.MeshStandardMaterial({ color: 0x666666 });
-
-    const crossbarGeo = new THREE.BoxGeometry(4, 0.3, 0.3);
-
-    // Main lift line
-    const liftX = -100;
-    for (let z = -this.length / 2 + 100; z < this.length / 2 - 100; z += 80) {
-      const height = this.calculateHeight(liftX, z);
-
-      const tower = new THREE.Mesh(towerGeo, towerMat);
-      tower.position.set(liftX, height + 6, z);
-      tower.castShadow = true;
-      towerGroup.add(tower);
-
-      const crossbar = new THREE.Mesh(crossbarGeo, towerMat);
-      crossbar.position.set(liftX, height + 11.5, z);
-      towerGroup.add(crossbar);
-    }
-
-    this.sceneManager.add(towerGroup);
+    this.sceneManager.add(markerGroup);
   }
 
   createPhysicsCollider(geometry) {

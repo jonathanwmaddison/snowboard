@@ -22,12 +22,18 @@ export class PlayerController {
 
     // Snowboard sidecut geometry (determines natural turn radius)
     // Real values: 6-8m (aggressive), 10-13m (all-mountain), 15-17m (GS)
-    this.sidecutRadius = 8; // meters - more aggressive for responsive turning
+    this.sidecutRadius = 7; // meters - aggressive for killer carves
 
     // Edge angle limits
-    this.maxEdgeAngleLowSpeed = 1.1; // ~63 degrees at low speed
-    this.maxEdgeAngleHighSpeed = 0.5; // ~29 degrees at high speed
+    this.maxEdgeAngleLowSpeed = 1.2; // ~69 degrees at low speed - deep carves!
+    this.maxEdgeAngleHighSpeed = 0.6; // ~34 degrees at high speed
     this.highSpeedThreshold = 30; // m/s where we reach max restriction
+
+    // === CARVE RAIL SYSTEM ===
+    // When locked into a deep carve, you're "on rails"
+    this.carveRailThreshold = 0.5; // Edge angle to engage rail mode
+    this.carveRailStrength = 0;    // Current rail lock strength (0-1)
+    this.carveHoldTime = 0;        // How long we've held a carve
 
     // === ARCADE STABILITY ASSISTS (from racing game research) ===
     // Reduced - was fighting player input too much
@@ -93,6 +99,9 @@ export class PlayerController {
     // Pumping through turns builds speed
     this.carveEnergy = 0;
     this.lastCarveDirection = 0;
+    this.carveChainCount = 0;     // Consecutive carves counter
+    this.carvePerfection = 0;     // How clean the current carve is (0-1)
+    this.peakEdgeAngle = 0;       // Max edge angle in current carve
 
     // Snow spray particles
     this.sprayParticles = null;
@@ -223,7 +232,9 @@ export class PlayerController {
     // Spawn new particles when grounded and moving
     if (this.isGrounded && speed > 3) {
       // More particles during carves and at higher speeds
-      const spawnRate = Math.min(speed * 0.3, 8) + (isCarving ? 5 : 0);
+      // KILLER CARVES = KILLER SPRAY
+      const carveIntensity = isCarving ? (Math.abs(edgeAngle) * 2 + this.carveRailStrength * 3) : 0;
+      const spawnRate = Math.min(speed * 0.4, 10) + carveIntensity * 4;
       const particlesToSpawn = Math.floor(spawnRate * dt * 60);
 
       for (let i = 0; i < particlesToSpawn; i++) {
@@ -253,11 +264,13 @@ export class PlayerController {
         positions[idx * 3 + 2] = spawnZ;
 
         // Velocity - spray outward and up
-        const spraySpeed = speed * 0.15 + Math.random() * 2;
+        // More dramatic spray during deep carves!
+        const carveBoost = isCarving ? 1 + this.carveRailStrength * 1.5 : 1;
+        const spraySpeed = (speed * 0.2 + Math.random() * 2.5) * carveBoost;
         this.sprayVelocities[idx].set(
-          boardRight.x * side * spraySpeed + (Math.random() - 0.5) * 1.5,
-          1.5 + Math.random() * 2,
-          boardRight.z * side * spraySpeed + (Math.random() - 0.5) * 1.5
+          boardRight.x * side * spraySpeed + (Math.random() - 0.5) * 2,
+          (1.5 + Math.random() * 2.5) * carveBoost,
+          boardRight.z * side * spraySpeed + (Math.random() - 0.5) * 2
         );
 
         // Add some of the board's velocity
@@ -483,15 +496,22 @@ export class PlayerController {
     this.weightForward = THREE.MathUtils.lerp(this.weightForward, this.input.lean * 0.8, 8 * dt);
 
     // === EDGE ANGLE - direct and responsive ===
-    const maxEdge = 1.0; // ~57 degrees max
+    const maxEdge = 1.15; // ~66 degrees max - deep carves!
     this.targetEdgeAngle = this.input.steer * maxEdge;
 
-    // Fast edge response
-    const edgeLerpSpeed = 15;
+    // Fast edge response - faster at low speeds, slightly slower when railing
+    const baseEdgeLerpSpeed = 15;
+    const railSlowdown = this.carveRailStrength * 0.3; // Rail mode stabilizes edge
+    const edgeLerpSpeed = baseEdgeLerpSpeed * (1 - railSlowdown);
     this.edgeAngle = THREE.MathUtils.lerp(this.edgeAngle, this.targetEdgeAngle, edgeLerpSpeed * dt);
 
     const absEdge = Math.abs(this.edgeAngle);
     const edgeSign = Math.sign(this.edgeAngle);
+
+    // Track peak edge angle for this carve
+    if (absEdge > this.peakEdgeAngle) {
+      this.peakEdgeAngle = absEdge;
+    }
 
     // === EDGE TRANSITION DETECTION ===
     // Detect when we switch from one edge to another (the "pop")
@@ -505,15 +525,53 @@ export class PlayerController {
       // Faster transitions and higher speeds = more pop
       const transitionSpeed = Math.abs(this.edgeAngle - this.previousEdgeSide * maxEdge);
       const speedBonus = Math.min(speed2D / 20, 1.5);
-      this.edgeTransitionBoost = transitionSpeed * speedBonus * 3.0;
+
+      // === CARVE CHAIN BONUS ===
+      // Consecutive clean carves build multiplier
+      const cleanCarve = this.peakEdgeAngle > 0.5 && this.carveHoldTime > 0.3;
+      if (cleanCarve) {
+        this.carveChainCount = Math.min(this.carveChainCount + 1, 10);
+      } else {
+        this.carveChainCount = Math.max(0, this.carveChainCount - 1);
+      }
+
+      // Chain multiplier: 1.0 at 0, up to 2.0 at 10 chains
+      const chainMultiplier = 1.0 + this.carveChainCount * 0.1;
+
+      // Calculate the boost
+      this.edgeTransitionBoost = transitionSpeed * speedBonus * 3.5 * chainMultiplier;
       this.lastEdgeChangeTime = 0;
 
-      // Carve energy from good edge changes
-      this.carveEnergy = Math.min(this.carveEnergy + 0.3, 1.0);
+      // Carve energy from good edge changes - more from deep carves
+      const carveQuality = Math.min(1, this.peakEdgeAngle / 0.8);
+      this.carveEnergy = Math.min(this.carveEnergy + 0.3 * carveQuality * chainMultiplier, 1.5);
+
+      // Reset carve tracking for next carve
+      this.peakEdgeAngle = 0;
+      this.carveHoldTime = 0;
+      this.carveRailStrength = 0;
     }
 
     this.previousEdgeSide = currentEdgeSide;
     this.lastEdgeChangeTime += dt;
+
+    // === CARVE RAIL SYSTEM ===
+    // Deep carves build "rail" strength - you lock into the turn
+    if (absEdge > this.carveRailThreshold && speed2D > 8) {
+      this.carveHoldTime += dt;
+
+      // Rail strength builds over time in deep carve
+      const targetRail = Math.min(1, (absEdge - this.carveRailThreshold) * 2);
+      this.carveRailStrength = THREE.MathUtils.lerp(this.carveRailStrength, targetRail, 3 * dt);
+
+      // Track carve perfection (how steady the edge is held)
+      const edgeStability = 1 - Math.abs(this.edgeAngle - this.targetEdgeAngle) * 2;
+      this.carvePerfection = THREE.MathUtils.lerp(this.carvePerfection, edgeStability, 2 * dt);
+    } else {
+      // Not in deep carve - decay rail
+      this.carveRailStrength *= Math.pow(0.1, dt);
+      this.carvePerfection *= 0.95;
+    }
 
     // === APPLY EDGE TRANSITION BOOST ===
     if (this.edgeTransitionBoost > 0.1) {
@@ -525,12 +583,19 @@ export class PlayerController {
 
     // === COMPRESSION SYSTEM ===
     // Compress during hard carves, extend on transitions
+    // G-force based compression - deeper/faster carves = more compression
+    const carveGForce = speed2D > 5 && absEdge > 0.3
+      ? (speed2D * absEdge) / 15
+      : 0;
+
     if (absEdge > 0.4) {
-      // Carving - compress into the turn
-      this.targetCompression = 0.3 + absEdge * 0.4;
+      // Carving - compress into the turn based on G-forces
+      const gCompression = Math.min(carveGForce * 0.3, 0.4);
+      this.targetCompression = 0.25 + absEdge * 0.35 + gCompression;
     } else if (edgeSwitched) {
       // Edge switch - momentary extension (the "pop" feeling)
-      this.targetCompression = -0.2;
+      // Bigger pop from deeper previous carve
+      this.targetCompression = -0.25 - this.carveEnergy * 0.15;
     } else {
       // Neutral - slight crouch for stability
       this.targetCompression = 0.1;
@@ -596,13 +661,30 @@ export class PlayerController {
       this.slipAngle = this.normalizeAngle(velDir - this.heading);
     }
 
-    // === GRIP SYSTEM (simplified) ===
+    // === GRIP SYSTEM (enhanced for carving) ===
     const baseGrip = 0.7;
-    const edgeGrip = absEdge * 0.25;
-    let finalGrip = THREE.MathUtils.clamp(baseGrip + edgeGrip, 0.5, 0.95);
+    const edgeGrip = absEdge * 0.3; // More grip from deeper edges
+
+    // Rail mode adds significant extra grip - you're locked in!
+    const railGrip = this.carveRailStrength * 0.15;
+
+    let finalGrip = THREE.MathUtils.clamp(baseGrip + edgeGrip + railGrip, 0.5, 0.98);
 
     // Apply grip
     const newLateralSpeed = lateralSpeed * (1 - finalGrip);
+
+    // === CARVE ACCELERATION ===
+    // Deep, clean carves actually generate speed (pumping physics)
+    if (this.carveRailStrength > 0.3 && this.carvePerfection > 0.5) {
+      // The faster you're going and deeper the carve, the more G-force
+      const gForce = (speed2D * speed2D) / (this.sidecutRadius / Math.max(Math.sin(absEdge), 0.1));
+      const normalizedG = Math.min(gForce / 100, 1); // Cap the effect
+
+      // Carve acceleration - like pumping in the turn
+      const carveAccel = normalizedG * this.carveRailStrength * this.carvePerfection * 2.0;
+      this.velocity.x += forward.x * carveAccel * dt;
+      this.velocity.z += forward.z * carveAccel * dt;
+    }
 
     // === RECONSTRUCT VELOCITY ===
     this.velocity.x = forward.x * forwardSpeed + right.x * newLateralSpeed;
@@ -1045,6 +1127,11 @@ export class PlayerController {
     // Reset carve momentum
     this.carveEnergy = 0;
     this.lastCarveDirection = 0;
+    this.carveChainCount = 0;
+    this.carvePerfection = 0;
+    this.peakEdgeAngle = 0;
+    this.carveRailStrength = 0;
+    this.carveHoldTime = 0;
   }
 
   getPosition() {
