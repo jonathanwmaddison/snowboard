@@ -11,8 +11,8 @@ export class TerrainGenerator {
     // Mountain parameters
     this.length = 1000;  // meters downhill
     this.width = 200;    // meters wide
-    this.segmentsX = 200;
-    this.segmentsZ = 500;
+    this.segmentsX = 400;
+    this.segmentsZ = 1000;
 
     // Noise generators
     this.noise = new SimplexNoise(12345);
@@ -28,6 +28,11 @@ export class TerrainGenerator {
     // These create rhythm opportunities and scoring zones
     this.features = [];
     this.generateFeatures();
+
+    // === SNOW CONDITIONS (ice, powder, groomed) ===
+    // Creates challenge zones that affect grip and speed
+    this.snowZones = [];
+    this.generateSnowZones();
   }
 
   /**
@@ -103,6 +108,132 @@ export class TerrainGenerator {
     }
   }
 
+  /**
+   * Generate snow condition zones (ice, powder, groomed)
+   * Ice = challenging, low grip but faster
+   * Powder = forgiving, high grip but slower
+   * Groomed = default balanced conditions
+   */
+  generateSnowZones() {
+    this.snowZones = [];
+
+    let z = -this.length / 2 + 80;
+    while (z < this.length / 2 - 100) {
+      const trailX = this.getTrailCenterX(z);
+
+      // Random zone type with weighted probability
+      const rand = Math.random();
+      let zoneType;
+
+      if (rand < 0.15) {
+        // ICE PATCH - challenging! Appears on shaded/steep sections
+        zoneType = 'ice';
+      } else if (rand < 0.30) {
+        // POWDER - off the groomed line, forgiving but slow
+        zoneType = 'powder';
+      } else if (rand < 0.40) {
+        // SLUSH - late day conditions, unpredictable
+        zoneType = 'slush';
+      } else {
+        // Skip - leave as groomed (don't add zone)
+        z += 40 + Math.random() * 60;
+        continue;
+      }
+
+      // Zone dimensions
+      const zoneWidth = 15 + Math.random() * 20;
+      const zoneLength = 20 + Math.random() * 30;
+
+      // Position offset from trail center
+      const xOffset = (Math.random() - 0.5) * this.trailWidth * 0.6;
+
+      this.snowZones.push({
+        type: zoneType,
+        x: trailX + xOffset,
+        z: z,
+        width: zoneWidth,
+        length: zoneLength,
+        // Properties based on type
+        gripMultiplier: this.getZoneGrip(zoneType),
+        speedMultiplier: this.getZoneSpeed(zoneType),
+        dragMultiplier: this.getZoneDrag(zoneType)
+      });
+
+      // Space between zones
+      z += zoneLength + 50 + Math.random() * 80;
+    }
+  }
+
+  getZoneGrip(type) {
+    switch (type) {
+      case 'ice': return 0.4;      // Very low grip - hard to hold edge
+      case 'powder': return 1.2;   // High grip - forgiving
+      case 'slush': return 0.7;    // Unpredictable grip
+      default: return 1.0;
+    }
+  }
+
+  getZoneSpeed(type) {
+    switch (type) {
+      case 'ice': return 1.15;     // Fast! Low friction
+      case 'powder': return 0.7;   // Slow - snow resistance
+      case 'slush': return 0.85;   // Slightly slow
+      default: return 1.0;
+    }
+  }
+
+  getZoneDrag(type) {
+    switch (type) {
+      case 'ice': return 0.7;      // Less drag
+      case 'powder': return 1.8;   // High drag
+      case 'slush': return 1.3;    // Medium drag
+      default: return 1.0;
+    }
+  }
+
+  /**
+   * Get snow condition at a position
+   * Returns { type, gripMultiplier, speedMultiplier, dragMultiplier, intensity }
+   */
+  getSnowCondition(x, z) {
+    // Default groomed conditions
+    const condition = {
+      type: 'groomed',
+      gripMultiplier: 1.0,
+      speedMultiplier: 1.0,
+      dragMultiplier: 1.0,
+      intensity: 0  // 0 = not in zone, 1 = center of zone
+    };
+
+    // Check all snow zones
+    for (const zone of this.snowZones) {
+      const dx = x - zone.x;
+      const dz = z - zone.z;
+
+      // Elliptical zone check
+      const normalizedX = dx / (zone.width / 2);
+      const normalizedZ = dz / (zone.length / 2);
+      const distSq = normalizedX * normalizedX + normalizedZ * normalizedZ;
+
+      if (distSq < 1) {
+        // Inside zone - calculate intensity (1 at center, 0 at edge)
+        const dist = Math.sqrt(distSq);
+        const intensity = 1 - dist;
+
+        // Blend with default based on intensity (smooth transition)
+        condition.type = zone.type;
+        condition.intensity = intensity;
+        condition.gripMultiplier = 1 + (zone.gripMultiplier - 1) * intensity;
+        condition.speedMultiplier = 1 + (zone.speedMultiplier - 1) * intensity;
+        condition.dragMultiplier = 1 + (zone.dragMultiplier - 1) * intensity;
+
+        break; // Use first matching zone
+      }
+    }
+
+    return condition;
+  }
+
   // Get the X position of the trail center at a given Z
   getTrailCenterX(z) {
     // Trail weaves left and right using sine waves
@@ -121,6 +252,20 @@ export class TerrainGenerator {
     const trailX = this.getTrailCenterX(z);
     const distFromCenter = Math.abs(x - trailX);
     return distFromCenter / (this.trailWidth / 2);
+  }
+
+  // Calculate trail curvature at a given Z position
+  // Returns curvature value and direction (+/- for left/right turn)
+  getTrailCurvature(z) {
+    const delta = 5;  // Sample distance
+    const x0 = this.getTrailCenterX(z - delta);
+    const x1 = this.getTrailCenterX(z);
+    const x2 = this.getTrailCenterX(z + delta);
+
+    // Second derivative approximation for curvature
+    const curvature = (x2 - 2 * x1 + x0) / (delta * delta);
+
+    return curvature;
   }
 
   generate() {
@@ -153,10 +298,62 @@ export class TerrainGenerator {
     geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geometry.computeVertexNormals();
 
-    const material = new THREE.MeshStandardMaterial({
+    // Custom shader for fine corduroy pattern
+    const material = new THREE.ShaderMaterial({
+      uniforms: {
+        trailWidth: { value: this.trailWidth },
+        trailLength: { value: this.length },
+      },
+      vertexShader: `
+        varying vec3 vColor;
+        varying vec3 vWorldPos;
+        varying vec3 vNormal;
+
+        void main() {
+          vColor = color;
+          vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
+          vNormal = normalMatrix * normal;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform float trailWidth;
+        uniform float trailLength;
+
+        varying vec3 vColor;
+        varying vec3 vWorldPos;
+        varying vec3 vNormal;
+
+        void main() {
+          vec3 baseColor = vColor;
+
+          // Detect if on trail by color (trail is slightly blue-tinted)
+          float isTrail = step(0.01, baseColor.b - baseColor.r);
+
+          // Fine corduroy pattern - lines running down the trail (along X)
+          // ~3cm spacing for realistic groomed look
+          float corduroyFreq = 200.0; // Very fine lines
+          float corduroy = sin(vWorldPos.x * corduroyFreq);
+
+          // Sharpen the pattern
+          corduroy = smoothstep(-0.3, 0.3, corduroy);
+
+          // Subtle brightness variation (5% difference)
+          float corduroyEffect = mix(0.97, 1.03, corduroy) * isTrail + (1.0 - isTrail);
+
+          // Apply corduroy to base color
+          vec3 finalColor = baseColor * corduroyEffect;
+
+          // Simple lighting
+          vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
+          float diffuse = max(dot(vNormal, lightDir), 0.0);
+          float ambient = 0.4;
+          float light = ambient + diffuse * 0.6;
+
+          gl_FragColor = vec4(finalColor * light, 1.0);
+        }
+      `,
       vertexColors: true,
-      roughness: 0.85,
-      metalness: 0.0,
     });
 
     this.mesh = new THREE.Mesh(geometry, material);
@@ -236,19 +433,11 @@ export class TerrainGenerator {
       const carveDepth = 3 * trailBlend;
       trailHeight -= carveDepth;
 
-      // Groomed corduroy pattern
-      const corduroy = Math.sin(z * 6) * 0.08 * trailBlend;
-      trailHeight += corduroy;
+      // Groomed trail - completely flat cross-section for smooth carving
+      // No corduroy physics bumps, no banking - just pure smooth snow
 
-      // Very subtle variation
-      trailHeight += this.detailNoise.noise2D(x * 0.05, z * 0.04) * 0.3 * (1 - trailBlend);
-
-      // Banked edges - trail edges are slightly raised
-      const bankHeight = Math.pow(1 - trailBlend, 2) * 1.5;
-      trailHeight += bankHeight;
-
-      // === ADD TERRAIN FEATURES ===
-      trailHeight += this.getFeatureHeight(x, z, trailBlend);
+      // Terrain features disabled for smooth groomed trail
+      // trailHeight += this.getFeatureHeight(x, z, trailBlend);
     }
 
     // === BLEND TRAIL AND OFF-TRAIL ===
@@ -430,14 +619,74 @@ export class TerrainGenerator {
     const onTrail = trailDist < 1.0;
     const trailBlend = Math.max(0, 1 - trailDist);
 
-    if (onTrail) {
-      // GROOMED TRAIL - very distinct corduroy pattern
-      const corduroySine = Math.sin(z * 6);
-      const corduroyValue = (corduroySine + 1) * 0.5; // 0 to 1
+    // Check for snow condition zones
+    const snowCondition = this.getSnowCondition(x, z);
 
-      // Alternating light and dark stripes
-      const ridgeColor = { r: 0.95, g: 0.96, b: 0.98 };  // Bright
-      const valleyColor = { r: 0.80, g: 0.84, b: 0.92 }; // Darker blue-gray
+    if (onTrail) {
+      // GROOMED TRAIL - corduroy stripes running DOWN the trail
+      // Use X position relative to trail center for vertical lines
+      const trailCenterX = this.getTrailCenterX(z);
+      const relativeX = x - trailCenterX;
+
+      // Fine corduroy lines ~30cm apart (like real grooming)
+      const corduroyFreq = 20; // ~30cm wavelength
+      const corduroySine = Math.sin(relativeX * corduroyFreq);
+
+      // Softer stripes for natural look
+      const corduroyValue = (corduroySine + 1) * 0.5;
+
+      // Subtle but visible contrast
+      let ridgeColor = { r: 0.98, g: 0.98, b: 1.0 };   // Bright
+      let valleyColor = { r: 0.88, g: 0.90, b: 0.95 }; // Slight shadow
+
+      // Modify colors based on snow condition
+      if (snowCondition.intensity > 0) {
+        const intensity = snowCondition.intensity;
+
+        switch (snowCondition.type) {
+          case 'ice':
+            // ICE - blue-ish, shiny, menacing
+            ridgeColor = {
+              r: THREE.MathUtils.lerp(ridgeColor.r, 0.75, intensity),
+              g: THREE.MathUtils.lerp(ridgeColor.g, 0.85, intensity),
+              b: THREE.MathUtils.lerp(ridgeColor.b, 1.0, intensity)
+            };
+            valleyColor = {
+              r: THREE.MathUtils.lerp(valleyColor.r, 0.6, intensity),
+              g: THREE.MathUtils.lerp(valleyColor.g, 0.75, intensity),
+              b: THREE.MathUtils.lerp(valleyColor.b, 0.95, intensity)
+            };
+            break;
+
+          case 'powder':
+            // POWDER - bright white, fluffy looking
+            ridgeColor = {
+              r: THREE.MathUtils.lerp(ridgeColor.r, 1.0, intensity),
+              g: THREE.MathUtils.lerp(ridgeColor.g, 1.0, intensity),
+              b: THREE.MathUtils.lerp(ridgeColor.b, 1.0, intensity)
+            };
+            valleyColor = {
+              r: THREE.MathUtils.lerp(valleyColor.r, 0.95, intensity),
+              g: THREE.MathUtils.lerp(valleyColor.g, 0.97, intensity),
+              b: THREE.MathUtils.lerp(valleyColor.b, 1.0, intensity)
+            };
+            break;
+
+          case 'slush':
+            // SLUSH - darker, wet looking
+            ridgeColor = {
+              r: THREE.MathUtils.lerp(ridgeColor.r, 0.82, intensity),
+              g: THREE.MathUtils.lerp(ridgeColor.g, 0.85, intensity),
+              b: THREE.MathUtils.lerp(ridgeColor.b, 0.88, intensity)
+            };
+            valleyColor = {
+              r: THREE.MathUtils.lerp(valleyColor.r, 0.7, intensity),
+              g: THREE.MathUtils.lerp(valleyColor.g, 0.74, intensity),
+              b: THREE.MathUtils.lerp(valleyColor.b, 0.8, intensity)
+            };
+            break;
+        }
+      }
 
       const r = THREE.MathUtils.lerp(valleyColor.r, ridgeColor.r, corduroyValue);
       const g = THREE.MathUtils.lerp(valleyColor.g, ridgeColor.g, corduroyValue);

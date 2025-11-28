@@ -9,7 +9,8 @@ export class InputHandler {
       toggleWireframe: null,
       toggleColliders: null,
       toggleFreeCamera: null,
-      toggleZenMode: null
+      toggleZenMode: null,
+      startChallenge: null
     };
 
     // Gamepad state
@@ -57,6 +58,9 @@ export class InputHandler {
         break;
       case 'KeyZ':
         if (this.callbacks.toggleZenMode) this.callbacks.toggleZenMode();
+        break;
+      case 'KeyG':
+        if (this.callbacks.startChallenge) this.callbacks.startChallenge();
         break;
     }
   }

@@ -1,9 +1,10 @@
 import * as THREE from 'three';
 
 export class PlayerController {
-  constructor(sceneManager, physicsWorld) {
+  constructor(sceneManager, physicsWorld, terrain = null) {
     this.sceneManager = sceneManager;
     this.physicsWorld = physicsWorld;
+    this.terrain = terrain; // Reference for snow conditions
 
     this.body = null;
     this.collider = null;
@@ -109,6 +110,22 @@ export class PlayerController {
     this.sprayVelocities = [];
     this.sprayLifetimes = [];
     this.maxParticles = 200;
+
+    // === SNOW CONDITION STATE ===
+    this.currentSnowCondition = {
+      type: 'groomed',
+      gripMultiplier: 1.0,
+      speedMultiplier: 1.0,
+      dragMultiplier: 1.0,
+      intensity: 0
+    };
+
+    // === RISK/STABILITY STATE ===
+    // Tracks how close to losing control
+    this.riskLevel = 0;           // 0 = safe, 1 = about to bail
+    this.wobbleAmount = 0;        // Visual instability
+    this.isRecovering = false;    // In recovery state after near-miss
+    this.recoveryTime = 0;
   }
 
   init(startPosition) {
@@ -661,14 +678,81 @@ export class PlayerController {
       this.slipAngle = this.normalizeAngle(velDir - this.heading);
     }
 
-    // === GRIP SYSTEM (enhanced for carving) ===
+    // === GET SNOW CONDITIONS ===
+    if (this.terrain) {
+      this.currentSnowCondition = this.terrain.getSnowCondition(pos.x, pos.z);
+    }
+
+    // === GRIP SYSTEM (enhanced for carving + snow conditions) ===
     const baseGrip = 0.7;
     const edgeGrip = absEdge * 0.3; // More grip from deeper edges
 
     // Rail mode adds significant extra grip - you're locked in!
     const railGrip = this.carveRailStrength * 0.15;
 
-    let finalGrip = THREE.MathUtils.clamp(baseGrip + edgeGrip + railGrip, 0.5, 0.98);
+    // Calculate base grip before snow condition
+    let calculatedGrip = baseGrip + edgeGrip + railGrip;
+
+    // Apply snow condition modifier
+    // Ice reduces grip, powder increases it
+    const snowGripMod = this.currentSnowCondition.gripMultiplier;
+    calculatedGrip *= snowGripMod;
+
+    let finalGrip = THREE.MathUtils.clamp(calculatedGrip, 0.3, 0.98);
+
+    // === RISK CALCULATION ===
+    // Risk increases when: high speed + deep edge + low grip surface
+    const speedRisk = Math.max(0, (speed2D - 20) / 30);  // Risk ramps up after 20 m/s
+    const edgeRisk = Math.pow(absEdge / 1.0, 2);         // Deeper edges = more risk
+    const gripDeficit = Math.max(0, 0.6 - finalGrip);   // Risk if grip is low
+
+    // Ice massively increases risk
+    const conditionRisk = this.currentSnowCondition.type === 'ice' ?
+      this.currentSnowCondition.intensity * 0.4 : 0;
+
+    // Combined risk
+    let targetRisk = (speedRisk * 0.3 + edgeRisk * 0.3 + gripDeficit * 0.3 + conditionRisk) *
+      (1 + speedRisk);  // Speed multiplies overall risk
+
+    // Recovery reduces risk buildup
+    if (this.isRecovering) {
+      targetRisk *= 0.3;
+    }
+
+    // Smooth risk changes
+    this.riskLevel = THREE.MathUtils.lerp(this.riskLevel, targetRisk, 5 * dt);
+    this.riskLevel = THREE.MathUtils.clamp(this.riskLevel, 0, 1);
+
+    // === HIGH RISK EFFECTS ===
+    if (this.riskLevel > 0.5) {
+      // Add wobble that increases with risk
+      const wobbleIntensity = (this.riskLevel - 0.5) * 2;
+      this.wobbleAmount = wobbleIntensity * (Math.random() - 0.5) * 0.15;
+
+      // Wobble affects heading slightly
+      this.headingVelocity += this.wobbleAmount * speed2D * 0.1;
+
+      // At extreme risk, grip fails more
+      if (this.riskLevel > 0.8) {
+        finalGrip *= 0.8;  // Grip degrades when pushing too hard
+      }
+    } else {
+      this.wobbleAmount *= 0.9;  // Decay wobble
+    }
+
+    // === RECOVERY STATE ===
+    if (this.riskLevel > 0.9 && !this.isRecovering) {
+      // Near-bail - enter recovery
+      this.isRecovering = true;
+      this.recoveryTime = 0.5;  // 0.5s recovery period
+    }
+
+    if (this.isRecovering) {
+      this.recoveryTime -= dt;
+      if (this.recoveryTime <= 0) {
+        this.isRecovering = false;
+      }
+    }
 
     // Apply grip
     const newLateralSpeed = lateralSpeed * (1 - finalGrip);
@@ -694,11 +778,16 @@ export class PlayerController {
     this.velocity.x += slopeDir.x * gravityAccel * dt;
     this.velocity.z += slopeDir.z * gravityAccel * dt;
 
-    // === DRAG ===
+    // === DRAG (affected by snow conditions) ===
     const baseDrag = 0.999;
     const carveDrag = absEdge * 0.001;
     const slideDrag = Math.abs(this.slipAngle) * 0.003;
-    const drag = baseDrag - carveDrag - slideDrag;
+
+    // Snow condition drag modifier
+    // Ice = less drag (faster), Powder = more drag (slower)
+    const snowDragMod = (this.currentSnowCondition.dragMultiplier - 1) * 0.003;
+
+    const drag = baseDrag - carveDrag - slideDrag - snowDragMod;
     this.velocity.x *= drag;
     this.velocity.z *= drag;
 
@@ -957,7 +1046,8 @@ export class PlayerController {
       if (normal.y < 0) normal.negate();
 
       // Very smooth normal following - prevents board rotation jitter
-      this.groundNormal.lerp(normal, 0.05);
+      // Use very slow lerp to avoid picking up mesh interpolation noise
+      this.groundNormal.lerp(normal, 0.02);
       this.groundNormal.normalize();
     }
   }
@@ -1132,6 +1222,12 @@ export class PlayerController {
     this.peakEdgeAngle = 0;
     this.carveRailStrength = 0;
     this.carveHoldTime = 0;
+
+    // Reset risk/stability
+    this.riskLevel = 0;
+    this.wobbleAmount = 0;
+    this.isRecovering = false;
+    this.recoveryTime = 0;
   }
 
   getPosition() {

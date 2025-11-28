@@ -383,6 +383,23 @@ export class FlowScore {
   }
 
   /**
+   * Add a bonus score (e.g., from gates)
+   */
+  addBonus(points, reason = '') {
+    this.currentScore += points;
+
+    // Show popup
+    this.showScorePopup = true;
+    this.scorePopupValue = points;
+    this.scorePopupTimer = 1.2;
+    this.flowPulse = Math.min(1, points / 200);
+
+    if (reason) {
+      console.log(`+${points} ${reason}`);
+    }
+  }
+
+  /**
    * Reset for new run
    */
   reset() {
