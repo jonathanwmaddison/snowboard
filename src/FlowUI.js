@@ -528,6 +528,102 @@ export class FlowUI {
           font-size: 14px;
         }
 
+        /* === BALANCE METER (center bottom) === */
+        .balance-meter {
+          position: absolute;
+          bottom: 80px;
+          left: 50%;
+          transform: translateX(-50%);
+          width: 100px;
+          height: 100px;
+          border: 2px solid rgba(255, 255, 255, 0.2);
+          border-radius: 50%;
+          background: rgba(0, 0, 0, 0.2);
+        }
+
+        .balance-crosshair {
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          width: 100%;
+          height: 100%;
+          transform: translate(-50%, -50%);
+        }
+
+        .balance-crosshair::before,
+        .balance-crosshair::after {
+          content: '';
+          position: absolute;
+          background: rgba(255, 255, 255, 0.15);
+        }
+
+        .balance-crosshair::before {
+          left: 50%;
+          top: 10%;
+          bottom: 10%;
+          width: 1px;
+          transform: translateX(-50%);
+        }
+
+        .balance-crosshair::after {
+          top: 50%;
+          left: 10%;
+          right: 10%;
+          height: 1px;
+          transform: translateY(-50%);
+        }
+
+        .balance-dot {
+          position: absolute;
+          width: 16px;
+          height: 16px;
+          background: rgba(150, 220, 255, 0.9);
+          border: 2px solid white;
+          border-radius: 50%;
+          transform: translate(-50%, -50%);
+          box-shadow: 0 0 15px rgba(150, 220, 255, 0.6);
+          transition: left 0.05s, top 0.05s;
+        }
+
+        .balance-dot.edge-left {
+          background: rgba(255, 180, 100, 0.9);
+          box-shadow: 0 0 15px rgba(255, 180, 100, 0.6);
+        }
+
+        .balance-dot.edge-right {
+          background: rgba(100, 255, 180, 0.9);
+          box-shadow: 0 0 15px rgba(100, 255, 180, 0.6);
+        }
+
+        .balance-label {
+          position: absolute;
+          bottom: -20px;
+          left: 50%;
+          transform: translateX(-50%);
+          font-size: 9px;
+          color: rgba(255, 255, 255, 0.5);
+          text-transform: uppercase;
+          letter-spacing: 1px;
+        }
+
+        .balance-labels {
+          position: absolute;
+          width: 100%;
+          height: 100%;
+          font-size: 8px;
+          color: rgba(255, 255, 255, 0.3);
+          text-transform: uppercase;
+        }
+
+        .balance-labels span {
+          position: absolute;
+        }
+
+        .balance-labels .lbl-fwd { top: -15px; left: 50%; transform: translateX(-50%); }
+        .balance-labels .lbl-back { bottom: -15px; left: 50%; transform: translateX(-50%); }
+        .balance-labels .lbl-heel { left: -25px; top: 50%; transform: translateY(-50%); }
+        .balance-labels .lbl-toe { right: -20px; top: 50%; transform: translateY(-50%); }
+
         /* === GATE CHALLENGE DISPLAY === */
         .gate-display {
           position: absolute;
@@ -666,6 +762,18 @@ export class FlowUI {
         <div class="gate-count" id="gate-count">0/0</div>
         <div class="gate-status" id="gate-status"></div>
       </div>
+
+      <div class="balance-meter" id="balance-meter">
+        <div class="balance-crosshair"></div>
+        <div class="balance-dot" id="balance-dot"></div>
+        <div class="balance-labels">
+          <span class="lbl-fwd">FWD</span>
+          <span class="lbl-back">BACK</span>
+          <span class="lbl-heel">HEEL</span>
+          <span class="lbl-toe">TOE</span>
+        </div>
+        <div class="balance-label">BALANCE</div>
+      </div>
     `;
 
     document.body.appendChild(this.container);
@@ -711,6 +819,10 @@ export class FlowUI {
     this.gateTimer = document.getElementById('gate-timer');
     this.gateCount = document.getElementById('gate-count');
     this.gateStatus = document.getElementById('gate-status');
+
+    // Balance meter elements
+    this.balanceMeter = document.getElementById('balance-meter');
+    this.balanceDot = document.getElementById('balance-dot');
 
     // Track last perfect state for flash trigger
     this.wasPerfect = false;
@@ -915,6 +1027,32 @@ export class FlowUI {
         this.gateDisplay.classList.remove('active');
         this.lastGateCleared = 0;
         this.lastGateMissed = 0;
+      }
+    }
+
+    // === BALANCE METER ===
+    if (this.balanceDot) {
+      // Get steer and lean values from flowState (-1 to 1)
+      const steer = flowState.steer || 0;  // Left/right (heel/toe edge)
+      const lean = flowState.lean || 0;    // Forward/back
+
+      // Convert to percentage position within the circle
+      // Center is 50%, range is 10% to 90% (leaving padding)
+      const x = 50 + (steer * 40);  // steer: -1 = 10%, 0 = 50%, 1 = 90%
+      const y = 50 - (lean * 40);   // lean: -1 = 90%, 0 = 50%, 1 = 10% (inverted)
+
+      this.balanceDot.style.left = `${x}%`;
+      this.balanceDot.style.top = `${y}%`;
+
+      // Color the dot based on edge angle
+      if (steer < -0.3) {
+        this.balanceDot.classList.add('edge-left');
+        this.balanceDot.classList.remove('edge-right');
+      } else if (steer > 0.3) {
+        this.balanceDot.classList.add('edge-right');
+        this.balanceDot.classList.remove('edge-left');
+      } else {
+        this.balanceDot.classList.remove('edge-left', 'edge-right');
       }
     }
   }

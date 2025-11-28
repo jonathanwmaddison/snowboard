@@ -126,6 +126,28 @@ export class PlayerController {
     this.wobbleAmount = 0;        // Visual instability
     this.isRecovering = false;    // In recovery state after near-miss
     this.recoveryTime = 0;
+
+    // === CARVE FAILURE STATES ===
+    // Wash out: edge slips when speed doesn't match edge angle
+    this.isWashingOut = false;
+    this.washOutIntensity = 0;    // 0-1, how bad the wash out is
+    this.washOutDirection = 0;    // Which way we're sliding (-1 heel, +1 toe)
+
+    // Edge catch: catching wrong edge during transition
+    this.isEdgeCaught = false;
+    this.edgeCatchSeverity = 0;   // 0-1, how bad (affects stumble)
+    this.edgeCatchTime = 0;       // Recovery timer
+
+    // Carve commitment: once you start, you gotta finish
+    this.carveCommitment = 0;     // 0-1, how committed to current carve
+    this.carveDirection = 0;      // Direction of committed carve
+    this.carveArcProgress = 0;    // How much of the arc completed (0-1)
+    this.carveEntrySpeed = 0;     // Speed when carve started
+    this.carveEntryEdge = 0;      // Edge angle when committed
+
+    // Turn shape tracking
+    this.turnShapeQuality = 1;    // 1 = perfect arc, 0 = jerky mess
+    this.lastEdgeAngleDelta = 0;  // For detecting jerky input
   }
 
   init(startPosition) {
@@ -154,35 +176,256 @@ export class PlayerController {
   }
 
   createVisualMesh() {
-    // Board
+    // === BOARD ===
     const boardGeometry = new THREE.BoxGeometry(this.boardWidth, 0.03, this.boardLength);
     const boardMaterial = new THREE.MeshLambertMaterial({ color: 0x1a4d8c });
     this.boardMesh = new THREE.Mesh(boardGeometry, boardMaterial);
 
-    // Rider - split into upper and lower body for compression animation
-    // Lower body (legs)
-    const legsGeometry = new THREE.CapsuleGeometry(0.08, 0.3, 4, 8);
-    const legsMaterial = new THREE.MeshLambertMaterial({ color: 0x222244 });
-    this.legsMesh = new THREE.Mesh(legsGeometry, legsMaterial);
-    this.legsMesh.position.y = 0.25;
+    // Materials
+    const pantsMaterial = new THREE.MeshLambertMaterial({ color: 0x222244 });
+    const jacketMaterial = new THREE.MeshLambertMaterial({ color: 0xcc2222 });
+    const skinMaterial = new THREE.MeshLambertMaterial({ color: 0xffcc88 });
+    const bootMaterial = new THREE.MeshLambertMaterial({ color: 0x111111 });
+    const gloveMaterial = new THREE.MeshLambertMaterial({ color: 0x333333 });
 
-    // Upper body (torso)
-    const torsoGeometry = new THREE.CapsuleGeometry(0.12, 0.35, 4, 8);
-    const torsoMaterial = new THREE.MeshLambertMaterial({ color: 0xcc2222 });
-    this.torsoMesh = new THREE.Mesh(torsoGeometry, torsoMaterial);
-    this.torsoMesh.position.y = 0.6;
+    // === ARTICULATED RIDER ===
+    // Stance: ~shoulder width apart, angled (duck stance typical: +15/-15 degrees)
+    const bindingAngleFront = 0.26; // ~15 degrees outward
+    const bindingAngleBack = -0.26; // ~15 degrees outward
 
-    // Head
-    const headGeometry = new THREE.SphereGeometry(0.1, 8, 6);
-    const headMaterial = new THREE.MeshLambertMaterial({ color: 0xffcc88 });
-    this.headMesh = new THREE.Mesh(headGeometry, headMaterial);
-    this.headMesh.position.y = 0.95;
+    // Leg segment lengths (realistic proportions)
+    this.thighLength = 0.22;
+    this.shinLength = 0.22;
+    this.bootHeight = 0.12;
 
-    // Rider group (for compression animation)
+    // === STANCE WIDTH ===
+    // Binding positions along board (z-axis)
+    // Typical stance: shoulder width, ~0.5m for this scale
+    const stanceWidth = 0.22;  // Distance from center to each binding
+
+    // === BOOTS (on bindings) - these stay fixed to board ===
+    const bootGeometry = new THREE.BoxGeometry(0.1, 0.08, 0.16);
+
+    this.frontBoot = new THREE.Mesh(bootGeometry, bootMaterial);
+    this.frontBoot.position.set(0, 0.06, stanceWidth);
+    this.frontBoot.rotation.y = bindingAngleFront;
+
+    this.backBoot = new THREE.Mesh(bootGeometry, bootMaterial);
+    this.backBoot.position.set(0, 0.06, -stanceWidth);
+    this.backBoot.rotation.y = bindingAngleBack;
+
+    // === LEGS WITH PROPER JOINT HIERARCHY ===
+    // Each leg: ankle pivot → shin → knee pivot → thigh
+    // This allows realistic IK-style bending
+
+    const thighGeometry = new THREE.CapsuleGeometry(0.05, this.thighLength, 4, 8);
+    const shinGeometry = new THREE.CapsuleGeometry(0.045, this.shinLength, 4, 8);
+    const kneeGeometry = new THREE.SphereGeometry(0.04, 6, 6);
+
+    // === FRONT LEG (hierarchical) ===
+    // Ankle pivot (at top of boot)
+    this.frontAnklePivot = new THREE.Group();
+    this.frontAnklePivot.position.set(0, this.bootHeight, stanceWidth);
+
+    // Shin connects to ankle
+    this.frontShin = new THREE.Mesh(shinGeometry, pantsMaterial);
+    this.frontShin.position.y = this.shinLength / 2 + 0.02;
+    this.frontAnklePivot.add(this.frontShin);
+
+    // Knee pivot (at top of shin)
+    this.frontKneePivot = new THREE.Group();
+    this.frontKneePivot.position.y = this.shinLength + 0.04;
+    this.frontAnklePivot.add(this.frontKneePivot);
+
+    // Knee cap visual
+    this.frontKnee = new THREE.Mesh(kneeGeometry, pantsMaterial);
+    this.frontKneePivot.add(this.frontKnee);
+
+    // Thigh connects to knee
+    this.frontThigh = new THREE.Mesh(thighGeometry, pantsMaterial);
+    this.frontThigh.position.y = this.thighLength / 2 + 0.02;
+    this.frontKneePivot.add(this.frontThigh);
+
+    // === BACK LEG (hierarchical) ===
+    this.backAnklePivot = new THREE.Group();
+    this.backAnklePivot.position.set(0, this.bootHeight, -stanceWidth);
+
+    this.backShin = new THREE.Mesh(shinGeometry, pantsMaterial);
+    this.backShin.position.y = this.shinLength / 2 + 0.02;
+    this.backAnklePivot.add(this.backShin);
+
+    this.backKneePivot = new THREE.Group();
+    this.backKneePivot.position.y = this.shinLength + 0.04;
+    this.backAnklePivot.add(this.backKneePivot);
+
+    this.backKnee = new THREE.Mesh(kneeGeometry, pantsMaterial);
+    this.backKneePivot.add(this.backKnee);
+
+    this.backThigh = new THREE.Mesh(thighGeometry, pantsMaterial);
+    this.backThigh.position.y = this.thighLength / 2 + 0.02;
+    this.backKneePivot.add(this.backThigh);
+
+    // === HIPS (connects legs to torso, key for angulation) ===
+    const hipsGeometry = new THREE.BoxGeometry(0.22, 0.1, 0.18);
+    this.hipsMesh = new THREE.Mesh(hipsGeometry, pantsMaterial);
+    this.hipsMesh.position.y = 0.40;
+
+    // === TORSO (upper body for counter-rotation) ===
+    const torsoGeometry = new THREE.CapsuleGeometry(0.09, 0.25, 4, 8);
+    this.torsoMesh = new THREE.Mesh(torsoGeometry, jacketMaterial);
+    this.torsoMesh.position.y = 0.62;
+
+    // === SHOULDERS (for arm attachment) ===
+    const shouldersGeometry = new THREE.BoxGeometry(0.28, 0.07, 0.1);
+    this.shouldersMesh = new THREE.Mesh(shouldersGeometry, jacketMaterial);
+    this.shouldersMesh.position.y = 0.78;
+
+    // === ARMS (rebuilt for natural hanging/board-aligned pose) ===
+    // Arms hang down by default, rotate forward/back along board axis
+    const upperArmGeometry = new THREE.CapsuleGeometry(0.04, 0.18, 4, 8);
+    const forearmGeometry = new THREE.CapsuleGeometry(0.035, 0.16, 4, 8);
+    const handGeometry = new THREE.SphereGeometry(0.045, 6, 4);
+
+    // Left arm - shoulder pivot point
+    this.leftShoulderPivot = new THREE.Group();
+    this.leftShoulderPivot.position.set(-0.14, 0.78, 0);
+
+    // Upper arm hangs down from shoulder
+    this.leftUpperArm = new THREE.Mesh(upperArmGeometry, jacketMaterial);
+    this.leftUpperArm.position.y = -0.12; // Hangs down
+    this.leftShoulderPivot.add(this.leftUpperArm);
+
+    // Elbow pivot (at bottom of upper arm)
+    this.leftElbowPivot = new THREE.Group();
+    this.leftElbowPivot.position.y = -0.22;
+    this.leftShoulderPivot.add(this.leftElbowPivot);
+
+    // Forearm
+    this.leftForearm = new THREE.Mesh(forearmGeometry, jacketMaterial);
+    this.leftForearm.position.y = -0.1;
+    this.leftElbowPivot.add(this.leftForearm);
+
+    // Hand
+    this.leftHand = new THREE.Mesh(handGeometry, gloveMaterial);
+    this.leftHand.position.y = -0.2;
+    this.leftElbowPivot.add(this.leftHand);
+
+    // Right arm - shoulder pivot point
+    this.rightShoulderPivot = new THREE.Group();
+    this.rightShoulderPivot.position.set(0.14, 0.78, 0);
+
+    // Upper arm hangs down
+    this.rightUpperArm = new THREE.Mesh(upperArmGeometry, jacketMaterial);
+    this.rightUpperArm.position.y = -0.12;
+    this.rightShoulderPivot.add(this.rightUpperArm);
+
+    // Elbow pivot
+    this.rightElbowPivot = new THREE.Group();
+    this.rightElbowPivot.position.y = -0.22;
+    this.rightShoulderPivot.add(this.rightElbowPivot);
+
+    // Forearm
+    this.rightForearm = new THREE.Mesh(forearmGeometry, jacketMaterial);
+    this.rightForearm.position.y = -0.1;
+    this.rightElbowPivot.add(this.rightForearm);
+
+    // Hand
+    this.rightHand = new THREE.Mesh(handGeometry, gloveMaterial);
+    this.rightHand.position.y = -0.2;
+    this.rightElbowPivot.add(this.rightHand);
+
+    // === HEAD (with neck for look direction) ===
+    const neckGeometry = new THREE.CylinderGeometry(0.03, 0.035, 0.06, 8);
+    this.neckMesh = new THREE.Mesh(neckGeometry, skinMaterial);
+    this.neckMesh.position.y = 0.84;
+
+    const headGeometry = new THREE.SphereGeometry(0.085, 10, 8);
+    this.headMesh = new THREE.Mesh(headGeometry, skinMaterial);
+    this.headMesh.position.y = 0.94;
+
+    // Helmet/goggles for style
+    const helmetGeometry = new THREE.SphereGeometry(0.09, 10, 8, 0, Math.PI * 2, 0, Math.PI / 2);
+    const helmetMaterial = new THREE.MeshLambertMaterial({ color: 0x444444 });
+    this.helmetMesh = new THREE.Mesh(helmetGeometry, helmetMaterial);
+    this.helmetMesh.position.y = 0.94;
+
+    const goggleGeometry = new THREE.BoxGeometry(0.15, 0.04, 0.06);
+    const goggleMaterial = new THREE.MeshLambertMaterial({ color: 0x222288 });
+    this.goggleMesh = new THREE.Mesh(goggleGeometry, goggleMaterial);
+    this.goggleMesh.position.set(0, 0.95, 0.07);
+
+    // === ASSEMBLE RIDER ===
     this.riderGroup = new THREE.Group();
-    this.riderGroup.add(this.legsMesh);
-    this.riderGroup.add(this.torsoMesh);
-    this.riderGroup.add(this.headMesh);
+
+    // Lower body group (follows board more closely)
+    this.lowerBodyGroup = new THREE.Group();
+    this.lowerBodyGroup.add(this.frontBoot);
+    this.lowerBodyGroup.add(this.backBoot);
+    this.lowerBodyGroup.add(this.frontAnklePivot);
+    this.lowerBodyGroup.add(this.backAnklePivot);
+    this.lowerBodyGroup.add(this.hipsMesh);
+
+    // Upper body group (counter-rotates)
+    this.upperBodyGroup = new THREE.Group();
+    this.upperBodyGroup.add(this.torsoMesh);
+    this.upperBodyGroup.add(this.shouldersMesh);
+    this.upperBodyGroup.add(this.leftShoulderPivot);
+    this.upperBodyGroup.add(this.rightShoulderPivot);
+    this.upperBodyGroup.add(this.neckMesh);
+    this.upperBodyGroup.add(this.headMesh);
+    this.upperBodyGroup.add(this.helmetMesh);
+    this.upperBodyGroup.add(this.goggleMesh);
+
+    this.riderGroup.add(this.lowerBodyGroup);
+    this.riderGroup.add(this.upperBodyGroup);
+
+    // === ANIMATION STATE ===
+    this.animState = {
+      // Angulation (upper body tilt away from turn)
+      angulation: 0,
+      targetAngulation: 0,
+
+      // Counter-rotation (shoulders vs hips)
+      counterRotation: 0,
+      targetCounterRotation: 0,
+
+      // Anticipation (looking into next turn)
+      headLook: 0,
+      targetHeadLook: 0,
+
+      // Arm positions (-1 to 1 for various poses)
+      leftArmPose: 0,
+      rightArmPose: 0,
+
+      // === DETAILED LEG STATE ===
+      // Knee bend angles (radians, 0 = straight, positive = bent back)
+      frontKneeAngle: 0.65,       // Current front knee bend - always athletic
+      backKneeAngle: 0.65,        // Current back knee bend
+      targetFrontKnee: 0.65,      // Target front knee
+      targetBackKnee: 0.65,       // Target back knee
+
+      // Ankle flex (radians, positive = toes up/shin forward)
+      frontAnkleAngle: 0.1,
+      backAnkleAngle: 0.1,
+      targetFrontAnkle: 0.1,
+      targetBackAnkle: 0.1,
+
+      // Hip height (computed from knee bend)
+      hipHeight: 0.5,
+      targetHipHeight: 0.5,
+
+      // Hip shift (lateral movement over board)
+      hipShift: 0,
+
+      // Leg lateral spread (for edging)
+      legSpread: 0,
+
+      // Style flair (accumulated from good carves)
+      styleFlair: 0,
+
+      // G-force compression (reactive to carving forces)
+      gForceCompression: 0
+    };
 
     this.mesh = new THREE.Group();
     this.mesh.add(this.boardMesh);
@@ -537,7 +780,119 @@ export class PlayerController {
                          this.previousEdgeSide !== 0 &&
                          currentEdgeSide !== this.previousEdgeSide;
 
-    if (edgeSwitched && speed2D > 5) {
+    // === EDGE CATCH DETECTION ===
+    // Catching an edge = bad news. Happens when:
+    // 1. Transitioning too fast at high speed
+    // 2. Heading misaligned with velocity (sideways to motion)
+    // 3. Switching edges while still committed to previous carve
+    if (edgeSwitched && speed2D > 6 && !this.isEdgeCaught && !this.isWashingOut) {
+      // Calculate how "violent" the transition was
+      const transitionViolence = Math.abs(this.edgeAngle - this.previousEdgeSide * maxEdge);
+
+      // Check heading vs velocity alignment
+      const velHeading = Math.atan2(-this.velocity.x, this.velocity.z);
+      const headingMismatch = Math.abs(this.normalizeAngle(velHeading - this.heading));
+
+      // Risk factors for edge catch - MORE AGGRESSIVE
+      const speedFactor = Math.max(0, (speed2D - 8) / 15); // Kicks in earlier
+      const violenceFactor = transitionViolence > 0.8 ? (transitionViolence - 0.8) * 1.5 : 0;
+      const alignmentFactor = headingMismatch > 0.2 ? (headingMismatch - 0.2) * 3 : 0;
+      const commitmentFactor = this.carveCommitment > 0.3 ? this.carveCommitment * 0.8 : 0;
+
+      // Combined risk - higher base values
+      const catchRisk = (speedFactor * 0.4 + violenceFactor * 0.4 +
+                         alignmentFactor * 0.4 + commitmentFactor) * (1 + speedFactor * 0.5);
+
+      // Deterministic with small random element - happens more reliably
+      if (catchRisk > 0.25 && Math.random() < catchRisk * 0.8) {
+        // EDGE CATCH! Bad times.
+        this.isEdgeCaught = true;
+        this.edgeCatchSeverity = Math.min(catchRisk * 1.5, 1.0);
+        this.edgeCatchTime = 0.4 + this.edgeCatchSeverity * 0.5; // 0.4-0.9s recovery
+
+        // Immediate consequences
+        this.carveChainCount = 0; // Chain broken
+        this.carveCommitment = 0;
+      }
+    }
+
+    // === EDGE CATCH CONSEQUENCES ===
+    if (this.isEdgeCaught) {
+      // Stumble! Board catches, momentum kills you
+      const stumbleForce = this.edgeCatchSeverity * 20;
+
+      // Thrown forward HARD and sideways
+      this.velocity.x += forward.x * stumbleForce * dt * -1.0; // Heavy braking
+      this.velocity.z += forward.z * stumbleForce * dt * -1.0;
+
+      // Sideways stumble
+      const stumbleDir = this.edgeAngle > 0 ? 1 : -1;
+      this.velocity.x += right.x * stumbleDir * stumbleForce * dt * 0.5;
+      this.velocity.z += right.z * stumbleDir * stumbleForce * dt * 0.5;
+
+      // MASSIVE speed loss - this is a crash
+      const catchSpeedLoss = 1 - (this.edgeCatchSeverity * 0.4 * dt * 60);
+      this.velocity.x *= catchSpeedLoss;
+      this.velocity.z *= catchSpeedLoss;
+
+      // Heading gets yanked violently
+      this.headingVelocity += (Math.random() - 0.5) * this.edgeCatchSeverity * 8;
+
+      // Compression spikes MAX (impact absorption)
+      this.targetCompression = 0.8;
+
+      // Edge forced flat instantly
+      this.edgeAngle = THREE.MathUtils.lerp(this.edgeAngle, 0, 20 * dt);
+
+      // Recovery timer
+      this.edgeCatchTime -= dt;
+      if (this.edgeCatchTime <= 0) {
+        this.isEdgeCaught = false;
+        this.edgeCatchSeverity = 0;
+        this.isRecovering = true;
+        this.recoveryTime = 0.7; // Long recovery
+      }
+    }
+
+    // === CARVE COMMITMENT SYSTEM ===
+    // Once you commit to a carve, you need to follow through
+    if (absEdge > 0.4 && speed2D > 10 && !this.isWashingOut && !this.isEdgeCaught) {
+      // Building commitment
+      if (this.carveCommitment < 0.3) {
+        // Just starting - record entry conditions
+        this.carveEntrySpeed = speed2D;
+        this.carveEntryEdge = absEdge;
+        this.carveDirection = edgeSign;
+      }
+
+      // Commitment builds the deeper you go
+      const commitRate = absEdge * 2;
+      this.carveCommitment = Math.min(this.carveCommitment + commitRate * dt, 1.0);
+
+      // Track arc progress (simplified - based on heading change)
+      this.carveArcProgress += Math.abs(this.headingVelocity) * dt * 0.3;
+    } else if (!this.isWashingOut && !this.isEdgeCaught) {
+      // Exiting carve - check if we completed it properly
+      if (this.carveCommitment > 0.5 && this.carveArcProgress < 0.3) {
+        // Bailed on a committed carve! Penalty.
+        const bailPenalty = this.carveCommitment * 0.5;
+        this.carveChainCount = Math.max(0, this.carveChainCount - 2);
+
+        // Small speed penalty for bailing
+        this.velocity.x *= (1 - bailPenalty * 0.1);
+        this.velocity.z *= (1 - bailPenalty * 0.1);
+
+        // Wobble from unclean exit
+        this.headingVelocity += (Math.random() - 0.5) * bailPenalty * 1.5;
+      }
+
+      // Decay commitment when not carving
+      this.carveCommitment *= Math.pow(0.1, dt * 2);
+      this.carveArcProgress *= 0.9;
+    }
+
+    // Good transition (not caught, completed previous carve)
+    if (edgeSwitched && speed2D > 5 && !this.isEdgeCaught) {
       // Edge-to-edge transition - the satisfying "pop"!
       // Faster transitions and higher speeds = more pop
       const transitionSpeed = Math.abs(this.edgeAngle - this.previousEdgeSide * maxEdge);
@@ -546,27 +901,32 @@ export class PlayerController {
       // === CARVE CHAIN BONUS ===
       // Consecutive clean carves build multiplier
       const cleanCarve = this.peakEdgeAngle > 0.5 && this.carveHoldTime > 0.3;
-      if (cleanCarve) {
+      const completedArc = this.carveArcProgress > 0.25;
+
+      if (cleanCarve && completedArc) {
         this.carveChainCount = Math.min(this.carveChainCount + 1, 10);
-      } else {
+      } else if (!cleanCarve) {
         this.carveChainCount = Math.max(0, this.carveChainCount - 1);
       }
 
       // Chain multiplier: 1.0 at 0, up to 2.0 at 10 chains
       const chainMultiplier = 1.0 + this.carveChainCount * 0.1;
 
-      // Calculate the boost
-      this.edgeTransitionBoost = transitionSpeed * speedBonus * 3.5 * chainMultiplier;
+      // Calculate the boost (reduced if didn't complete arc)
+      const arcBonus = completedArc ? 1.0 : 0.5;
+      this.edgeTransitionBoost = transitionSpeed * speedBonus * 3.5 * chainMultiplier * arcBonus;
       this.lastEdgeChangeTime = 0;
 
       // Carve energy from good edge changes - more from deep carves
-      const carveQuality = Math.min(1, this.peakEdgeAngle / 0.8);
+      const carveQuality = Math.min(1, this.peakEdgeAngle / 0.8) * arcBonus;
       this.carveEnergy = Math.min(this.carveEnergy + 0.3 * carveQuality * chainMultiplier, 1.5);
 
       // Reset carve tracking for next carve
       this.peakEdgeAngle = 0;
       this.carveHoldTime = 0;
       this.carveRailStrength = 0;
+      this.carveCommitment = 0;
+      this.carveArcProgress = 0;
     }
 
     this.previousEdgeSide = currentEdgeSide;
@@ -690,8 +1050,92 @@ export class PlayerController {
     // Rail mode adds significant extra grip - you're locked in!
     const railGrip = this.carveRailStrength * 0.15;
 
+    // === SPEED-EDGE COUPLING ===
+    // Deep edges require speed to sustain (centrifugal force physics)
+    // High speeds require edge angle to hold grip
+    let speedEdgeGrip = 1.0;
+
+    // How much speed is needed per radian of edge angle
+    // AGGRESSIVE: need 15 m/s to hold 1 rad (~57°) of edge
+    const minSpeedPerRadian = 15;  // Below this ratio, you wash out
+    const maxSpeedPerRadian = 25;  // Above this ratio, you slide out
+
+    // What edge angle is supportable at current speed?
+    const supportableEdge = speed2D / minSpeedPerRadian;
+    // What edge angle is required at current speed?
+    const requiredEdge = speed2D / maxSpeedPerRadian;
+
+    // === WASH OUT: Too much edge for speed ===
+    if (absEdge > supportableEdge && speed2D < 20) {
+      const overEdge = absEdge - supportableEdge;
+      // Aggressive penalty curve
+      const washOutPenalty = Math.min(overEdge * 2.0, 0.6);
+      speedEdgeGrip -= washOutPenalty;
+
+      // TRIGGER WASH OUT STATE - lower threshold, happens more easily
+      if (overEdge > 0.15 && !this.isWashingOut && !this.isEdgeCaught) {
+        this.isWashingOut = true;
+        this.washOutIntensity = Math.min(overEdge * 2.5, 1.0);
+        this.washOutDirection = edgeSign;
+      }
+    }
+
+    // === SLIDE OUT: Not enough edge for speed ===
+    if (absEdge < requiredEdge && speed2D > 10) {
+      const underEdge = requiredEdge - absEdge;
+      // More aggressive penalty
+      const slideOutPenalty = Math.min(underEdge * 1.5, 0.5);
+      speedEdgeGrip -= slideOutPenalty;
+
+      // TRIGGER SLIDE OUT STATE - lower threshold
+      if (underEdge > 0.15 && speed2D > 12 && !this.isWashingOut && !this.isEdgeCaught) {
+        this.isWashingOut = true;
+        this.washOutIntensity = Math.min(underEdge * 2.0, 0.9);
+        this.washOutDirection = edgeSign || (Math.random() > 0.5 ? 1 : -1);
+      }
+    }
+
+    speedEdgeGrip = Math.max(speedEdgeGrip, 0.4); // Floor to prevent complete loss
+
+    // === WASH OUT CONSEQUENCES ===
+    if (this.isWashingOut) {
+      // Board slides sideways HARD, losing control
+      const slideForce = this.washOutIntensity * 15;
+      this.velocity.x += right.x * this.washOutDirection * slideForce * dt;
+      this.velocity.z += right.z * this.washOutDirection * slideForce * dt;
+
+      // Heading gets yanked toward slide direction
+      this.headingVelocity += this.washOutDirection * this.washOutIntensity * 4 * dt;
+
+      // Speed bleeds off RAPIDLY - major consequence
+      const speedLoss = 1 - (this.washOutIntensity * 0.25 * dt * 60);
+      this.velocity.x *= speedLoss;
+      this.velocity.z *= speedLoss;
+
+      // Edge angle forced toward flat (can't hold edge during wash out)
+      this.edgeAngle = THREE.MathUtils.lerp(this.edgeAngle, 0, 12 * dt);
+
+      // Compression spikes hard (absorbing the chaos)
+      this.targetCompression = 0.6 + this.washOutIntensity * 0.3;
+
+      // Recovery: intensity decays slower
+      this.washOutIntensity -= dt * 1.8;
+      if (this.washOutIntensity <= 0.1) {
+        this.isWashingOut = false;
+        this.washOutIntensity = 0;
+        // Enter recovery state - longer
+        this.isRecovering = true;
+        this.recoveryTime = 0.6;
+        // Break carve chain completely
+        this.carveChainCount = 0;
+      }
+
+      // Kill grip during wash out
+      speedEdgeGrip = Math.min(speedEdgeGrip, 0.25);
+    }
+
     // Calculate base grip before snow condition
-    let calculatedGrip = baseGrip + edgeGrip + railGrip;
+    let calculatedGrip = (baseGrip + edgeGrip + railGrip) * speedEdgeGrip;
 
     // Apply snow condition modifier
     // Ice reduces grip, powder increases it
@@ -706,12 +1150,17 @@ export class PlayerController {
     const edgeRisk = Math.pow(absEdge / 1.0, 2);         // Deeper edges = more risk
     const gripDeficit = Math.max(0, 0.6 - finalGrip);   // Risk if grip is low
 
+    // Speed-edge mismatch risk (NEW)
+    // Adds risk when edge doesn't match speed
+    const speedEdgeMismatchRisk = (1 - speedEdgeGrip) * 0.6;
+
     // Ice massively increases risk
     const conditionRisk = this.currentSnowCondition.type === 'ice' ?
       this.currentSnowCondition.intensity * 0.4 : 0;
 
     // Combined risk
-    let targetRisk = (speedRisk * 0.3 + edgeRisk * 0.3 + gripDeficit * 0.3 + conditionRisk) *
+    let targetRisk = (speedRisk * 0.3 + edgeRisk * 0.2 + gripDeficit * 0.2 +
+                      speedEdgeMismatchRisk + conditionRisk) *
       (1 + speedRisk);  // Speed multiplies overall risk
 
     // Recovery reduces risk buildup
@@ -801,11 +1250,19 @@ export class PlayerController {
     }
 
     if (this.input.lean < -0.1) {
-      // Stand up / brake
+      // Stand up / brake - scrubbing snow to slow down
       const brakeStrength = Math.abs(this.input.lean);
-      const brakeFactor = 1 - brakeStrength * dt * 4;
+      // Much stronger braking - like scrubbing/skidding
+      const brakeFactor = 1 - brakeStrength * dt * 12;
       this.velocity.x *= brakeFactor;
       this.velocity.z *= brakeFactor;
+
+      // Also add extra drag when leaning back hard (sitting back = big speed scrub)
+      if (brakeStrength > 0.5) {
+        const extraDrag = (brakeStrength - 0.5) * dt * 8;
+        this.velocity.x *= (1 - extraDrag);
+        this.velocity.z *= (1 - extraDrag);
+      }
     }
 
     // === SPEED LIMITS ===
@@ -1073,29 +1530,21 @@ export class PlayerController {
     const pos = this.body.translation();
     this.mesh.position.set(pos.x, pos.y, pos.z);
 
-    // === COMPRESSION ANIMATION ===
-    // Rider squats and extends based on compression value
-    if (this.riderGroup) {
-      const compressAmount = this.compression * 0.25; // Max 0.2m of compression
+    if (!this.animState) return;
 
-      // Legs compress (scale Y and lower position)
-      this.legsMesh.scale.y = 1 - this.compression * 0.4;
-      this.legsMesh.position.y = 0.25 - compressAmount * 0.5;
+    const dt = 0.016; // Approximate frame time for animation smoothing
+    const speed2D = this.currentSpeed;
+    const absEdge = Math.abs(this.edgeAngle);
+    const edgeSign = Math.sign(this.edgeAngle);
 
-      // Torso lowers and tilts forward slightly when compressed
-      this.torsoMesh.position.y = 0.6 - compressAmount;
-      this.torsoMesh.rotation.x = this.compression * 0.2; // Lean forward when compressed
+    // === UPDATE ANIMATION STATE ===
+    this.updateAnimationState(dt, speed2D, absEdge, edgeSign);
 
-      // Head follows torso
-      this.headMesh.position.y = 0.95 - compressAmount * 1.2;
+    // === APPLY RIDER ANIMATION ===
+    this.applyRiderAnimation(dt);
 
-      // Torso leans into carves
-      this.torsoMesh.rotation.z = this.edgeAngle * 0.15;
-    }
-
+    // === BOARD ORIENTATION ===
     if (this.isGrounded) {
-      // === GROUNDED: Align to terrain + edge angle ===
-
       // Step 1: Heading rotation
       const headingQuat = new THREE.Quaternion();
       headingQuat.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -this.heading);
@@ -1105,12 +1554,11 @@ export class PlayerController {
       const slopeQuat = new THREE.Quaternion();
       slopeQuat.setFromUnitVectors(worldUp, this.groundNormal);
 
-      // Combine
       this.mesh.quaternion.copy(headingQuat);
       this.mesh.quaternion.premultiply(slopeQuat);
 
       // Step 3: Edge angle (carving tilt)
-      if (Math.abs(this.edgeAngle) > 0.001) {
+      if (absEdge > 0.001) {
         const boardForward = new THREE.Vector3(0, 0, 1);
         boardForward.applyQuaternion(this.mesh.quaternion);
 
@@ -1119,7 +1567,7 @@ export class PlayerController {
         this.mesh.quaternion.premultiply(edgeQuat);
       }
 
-      // Step 4: Subtle weight shift visual (nose/tail press)
+      // Step 4: Weight shift
       if (Math.abs(this.weightForward) > 0.1) {
         const boardRight = new THREE.Vector3(1, 0, 0);
         boardRight.applyQuaternion(this.mesh.quaternion);
@@ -1129,19 +1577,11 @@ export class PlayerController {
         this.mesh.quaternion.premultiply(pressQuat);
       }
     } else {
-      // === AIRBORNE: Full rotation control ===
-
-      // Build rotation from Euler angles for air tricks
-      const euler = new THREE.Euler(
-        this.pitch,           // X: front/back flip
-        -this.heading,        // Y: spin
-        this.roll,            // Z: barrel roll
-        'YXZ'                 // Rotation order
-      );
+      // Airborne
+      const euler = new THREE.Euler(this.pitch, -this.heading, this.roll, 'YXZ');
       this.mesh.quaternion.setFromEuler(euler);
 
-      // Add edge angle styling
-      if (Math.abs(this.edgeAngle) > 0.001) {
+      if (absEdge > 0.001) {
         const boardForward = new THREE.Vector3(0, 0, 1);
         boardForward.applyQuaternion(this.mesh.quaternion);
 
@@ -1149,18 +1589,410 @@ export class PlayerController {
         edgeQuat.setFromAxisAngle(boardForward, this.edgeAngle);
         this.mesh.quaternion.premultiply(edgeQuat);
       }
+    }
 
-      // Tuck animation in air
-      if (this.riderGroup) {
-        // More compressed during air tuck
-        const airTuck = Math.max(0, this.input.lean) * 0.3;
-        this.torsoMesh.rotation.x = airTuck * 0.4;
+    this.colliderMesh.position.copy(this.mesh.position);
+    this.colliderMesh.quaternion.copy(this.mesh.quaternion);
+  }
+
+  updateAnimationState(dt, speed2D, absEdge, edgeSign) {
+    const anim = this.animState;
+
+    // === G-FORCE CALCULATION ===
+    // This is the key driver for realistic leg compression!
+    // G = v² / r, where r = sidecutRadius / sin(edgeAngle)
+    let gForce = 1.0; // Base 1G standing
+    if (absEdge > 0.1 && speed2D > 3) {
+      const turnRadius = this.sidecutRadius / Math.max(Math.sin(absEdge), 0.1);
+      const lateralG = (speed2D * speed2D) / (turnRadius * 9.81);
+      gForce = Math.sqrt(1 + lateralG * lateralG); // Combined vertical + lateral
+    }
+
+    // Smooth G-force for animation (don't want jitter)
+    anim.gForceCompression = THREE.MathUtils.lerp(anim.gForceCompression, gForce, 12 * dt);
+
+    // === LEG COMPRESSION FROM G-FORCE ===
+    // Higher G = deeper knee bend (absorbing the force)
+    // Snowboarders ALWAYS ride with bent knees - never straight legs!
+    const minKneeAngle = 0.6;  // Athletic stance - always bent
+    const maxKneeAngle = 1.9;  // Deep compression squat
+
+    // Speed-based base bend - faster = more ready position
+    const speedBend = Math.min(speed2D / 20, 1) * 0.25;
+
+    // Base knee bend from G-force - this is the MAIN driver
+    // More aggressive multiplier for dramatic response
+    const gCompression = Math.min((anim.gForceCompression - 1) * 0.7, 0.9);
+    let baseKneeAngle = minKneeAngle + speedBend + gCompression * (maxKneeAngle - minKneeAngle);
+
+    // Add compression from physics system
+    baseKneeAngle += this.compression * 0.5;
+
+    // === FRONT VS BACK LEG DIFFERENTIAL ===
+    // In a carve, weight distribution shifts:
+    // - Toeside (edge > 0): More weight on front/downhill leg
+    // - Heelside (edge < 0): More weight on back leg
+    // The loaded leg compresses MORE
+    const weightShift = edgeSign * absEdge * 0.55;  // More dramatic difference
+    const speedMod = Math.min(speed2D / 12, 1);  // Kicks in earlier
+
+    // Front leg: compresses more on toeside
+    anim.targetFrontKnee = baseKneeAngle + weightShift * speedMod;
+    // Back leg: compresses more on heelside (nearly as much)
+    anim.targetBackKnee = baseKneeAngle - weightShift * speedMod * 0.85;
+
+    // Clamp knee angles
+    anim.targetFrontKnee = THREE.MathUtils.clamp(anim.targetFrontKnee, minKneeAngle, maxKneeAngle);
+    anim.targetBackKnee = THREE.MathUtils.clamp(anim.targetBackKnee, minKneeAngle, maxKneeAngle);
+
+    // === BRAKING STANCE ===
+    // When leaning back to brake, rider shifts weight back and stands taller
+    if (this.input.lean < -0.1) {
+      const brakeAmount = Math.abs(this.input.lean);
+      // Back leg extends more (takes the load), front leg relaxes
+      anim.targetBackKnee -= brakeAmount * 0.25;
+      anim.targetFrontKnee += brakeAmount * 0.15;
+    }
+
+    // === EDGE TRANSITION "POP" ===
+    // When switching edges, legs extend momentarily (the satisfying pop!)
+    if (this.edgeTransitionBoost > 0.3) {
+      const popExtend = this.edgeTransitionBoost * 0.5;
+      anim.targetFrontKnee -= popExtend;
+      anim.targetBackKnee -= popExtend;
+    }
+
+    // === ANKLE FLEX ===
+    // Shin angle relative to boot - crucial for edge pressure
+    // Positive = shin forward (flexed), negative = shin back
+    // Toeside: shins drive forward into the boot
+    // Heelside: shins stay more upright
+    if (edgeSign > 0) {
+      // Toeside - aggressive forward ankle flex
+      anim.targetFrontAnkle = 0.25 + absEdge * 0.3;
+      anim.targetBackAnkle = 0.15 + absEdge * 0.2;
+    } else if (edgeSign < 0) {
+      // Heelside - less forward flex, slight backward pressure
+      anim.targetFrontAnkle = 0.1 - absEdge * 0.1;
+      anim.targetBackAnkle = 0.05 - absEdge * 0.15;
+    } else {
+      // Neutral stance
+      anim.targetFrontAnkle = 0.15;
+      anim.targetBackAnkle = 0.1;
+    }
+
+    // === HIP HEIGHT (computed from leg geometry) ===
+    // Lower hips = more compressed stance
+    const avgKnee = (anim.targetFrontKnee + anim.targetBackKnee) / 2;
+    anim.targetHipHeight = 0.55 - avgKnee * 0.15;
+
+    // === HIP LATERAL SHIFT ===
+    // Hips move over the working edge
+    const targetHipShift = edgeSign * absEdge * 0.12 * speedMod;
+    anim.hipShift = THREE.MathUtils.lerp(anim.hipShift, targetHipShift, 10 * dt);
+
+    // === LEG SPREAD (knees apart/together for edging) ===
+    // Toeside: knees drive inward toward snow
+    // Heelside: knees push outward
+    anim.legSpread = THREE.MathUtils.lerp(anim.legSpread, -edgeSign * absEdge * 0.15, 8 * dt);
+
+    // === ANGULATION ===
+    const speedFactor = Math.min(speed2D / 20, 1);
+    const carveIntensity = absEdge * this.carveRailStrength;
+
+    // Upper body tilts AWAY from turn - more with G-force
+    anim.targetAngulation = -edgeSign * absEdge * 0.5 * (0.5 + speedFactor * 0.5);
+    anim.targetAngulation *= (1 + (anim.gForceCompression - 1) * 0.3);
+
+    if (this.carveRailStrength > 0.5) {
+      anim.targetAngulation *= 1 + this.carveRailStrength * 0.4;
+    }
+
+    // === COUNTER-ROTATION ===
+    const turnRate = this.headingVelocity;
+    anim.targetCounterRotation = -turnRate * 0.15;
+
+    if (absEdge > 0.3 && this.carveHoldTime > 0.3) {
+      anim.targetCounterRotation += edgeSign * 0.25;
+    }
+
+    // === HEAD LOOK ===
+    anim.targetHeadLook = -edgeSign * 0.35 + turnRate * 0.1;
+    if (this.carveRailStrength > 0.3) {
+      anim.targetHeadLook -= edgeSign * 0.2;
+    }
+
+    // === ARM DYNAMICS ===
+    if (edgeSign > 0) {
+      anim.leftArmPose = THREE.MathUtils.lerp(anim.leftArmPose, -0.7 - carveIntensity * 0.4, 8 * dt);
+      anim.rightArmPose = THREE.MathUtils.lerp(anim.rightArmPose, 0.5 + carveIntensity * 0.3, 8 * dt);
+    } else if (edgeSign < 0) {
+      anim.rightArmPose = THREE.MathUtils.lerp(anim.rightArmPose, -0.6 - carveIntensity * 0.4, 8 * dt);
+      anim.leftArmPose = THREE.MathUtils.lerp(anim.leftArmPose, 0.4 + carveIntensity * 0.3, 8 * dt);
+    } else {
+      anim.leftArmPose = THREE.MathUtils.lerp(anim.leftArmPose, 0, 5 * dt);
+      anim.rightArmPose = THREE.MathUtils.lerp(anim.rightArmPose, 0, 5 * dt);
+    }
+
+    // === STYLE FLAIR ===
+    if (this.carveChainCount > 2) {
+      anim.styleFlair = Math.min(anim.styleFlair + dt * 0.5, 1);
+    } else {
+      anim.styleFlair *= 0.98;
+    }
+
+    // === FAILURE STATE OVERRIDES ===
+    if (this.isWashingOut) {
+      const wobblePhase = Date.now() * 0.015;
+      anim.targetAngulation += Math.sin(wobblePhase) * this.washOutIntensity * 0.5;
+      anim.leftArmPose = Math.sin(wobblePhase * 1.2) * this.washOutIntensity;
+      anim.rightArmPose = Math.cos(wobblePhase * 1.1) * this.washOutIntensity;
+      anim.targetHeadLook += Math.sin(wobblePhase * 0.8) * this.washOutIntensity * 0.3;
+      // Legs scramble
+      anim.targetFrontKnee += Math.sin(wobblePhase * 2) * this.washOutIntensity * 0.3;
+      anim.targetBackKnee += Math.cos(wobblePhase * 2) * this.washOutIntensity * 0.3;
+    }
+
+    if (this.isEdgeCaught) {
+      const catchPhase = Date.now() * 0.02;
+      anim.targetAngulation = Math.sin(catchPhase) * this.edgeCatchSeverity * 0.5;
+      anim.leftArmPose = Math.sin(catchPhase * 2) * this.edgeCatchSeverity;
+      anim.rightArmPose = -Math.sin(catchPhase * 2 + 1) * this.edgeCatchSeverity;
+      // Deep compression on catch
+      anim.targetFrontKnee = 1.3 + this.edgeCatchSeverity * 0.3;
+      anim.targetBackKnee = 1.3 + this.edgeCatchSeverity * 0.3;
+    }
+
+    if (this.isRecovering) {
+      const recoverPhase = Date.now() * 0.01;
+      anim.targetAngulation *= 0.5;
+      anim.targetAngulation += Math.sin(recoverPhase) * 0.1;
+    }
+
+    // === SMOOTH ALL VALUES ===
+    // Knee angles - responsive but smooth
+    anim.frontKneeAngle = THREE.MathUtils.lerp(anim.frontKneeAngle, anim.targetFrontKnee, 12 * dt);
+    anim.backKneeAngle = THREE.MathUtils.lerp(anim.backKneeAngle, anim.targetBackKnee, 12 * dt);
+
+    // Ankle angles
+    anim.frontAnkleAngle = THREE.MathUtils.lerp(anim.frontAnkleAngle, anim.targetFrontAnkle, 10 * dt);
+    anim.backAnkleAngle = THREE.MathUtils.lerp(anim.backAnkleAngle, anim.targetBackAnkle, 10 * dt);
+
+    // Hip height
+    anim.hipHeight = THREE.MathUtils.lerp(anim.hipHeight, anim.targetHipHeight, 10 * dt);
+
+    // Upper body
+    anim.angulation = THREE.MathUtils.lerp(anim.angulation, anim.targetAngulation, 8 * dt);
+    anim.counterRotation = THREE.MathUtils.lerp(anim.counterRotation, anim.targetCounterRotation, 6 * dt);
+    anim.headLook = THREE.MathUtils.lerp(anim.headLook, anim.targetHeadLook, 10 * dt);
+  }
+
+  applyRiderAnimation(dt) {
+    if (!this.riderGroup || !this.animState) return;
+
+    const anim = this.animState;
+    const absEdge = Math.abs(this.edgeAngle);
+    const edgeSign = Math.sign(this.edgeAngle);
+
+    // === APPLY LEG IK-STYLE ANIMATION ===
+    // The key insight: ankle pivot rotates shin, knee pivot rotates thigh
+    // This creates realistic knee bend geometry
+
+    // Front leg
+    const frontKnee = anim.frontKneeAngle;
+    const frontAnkle = anim.frontAnkleAngle;
+
+    // Ankle pivot - shin tilts forward/back
+    this.frontAnklePivot.rotation.x = -frontAnkle;
+    // Add lateral tilt for edging (knees in/out)
+    this.frontAnklePivot.rotation.z = anim.legSpread;
+
+    // Knee pivot - thigh angles relative to shin
+    // When knee bends, thigh rotates back from vertical
+    this.frontKneePivot.rotation.x = frontKnee;
+
+    // Back leg
+    const backKnee = anim.backKneeAngle;
+    const backAnkle = anim.backAnkleAngle;
+
+    this.backAnklePivot.rotation.x = -backAnkle;
+    this.backAnklePivot.rotation.z = anim.legSpread;
+    this.backKneePivot.rotation.x = backKnee;
+
+    // === HIP POSITION ===
+    // Hips sit at the top of the thighs
+    // Height computed from leg bend
+    const avgKnee = (frontKnee + backKnee) / 2;
+    const hipY = this.bootHeight + this.shinLength + this.thighLength - avgKnee * 0.18;
+
+    this.hipsMesh.position.y = hipY;
+    this.hipsMesh.position.x = anim.hipShift;
+    this.hipsMesh.rotation.y = anim.counterRotation * 0.3;
+
+    // Forward/back hip shift based on weight distribution
+    const hipZ = (frontKnee - backKnee) * 0.05;
+    this.hipsMesh.position.z = hipZ;
+
+    // === LOWER BODY LATERAL SHIFT ===
+    this.lowerBodyGroup.position.x = anim.hipShift * 0.5;
+
+    // === UPPER BODY ===
+    const upperBodyY = hipY - 0.42; // Offset from hip position
+    this.upperBodyGroup.position.y = upperBodyY;
+    this.upperBodyGroup.position.x = anim.hipShift * 0.3;
+
+    // === TORSO - ANGULATION (the key carve look!) ===
+    this.torsoMesh.rotation.z = anim.angulation;
+    this.torsoMesh.rotation.y = anim.counterRotation;
+
+    // Forward lean - more when compressed
+    const forwardLean = avgKnee * 0.15 + this.currentSpeed * 0.003;
+    this.torsoMesh.rotation.x = forwardLean;
+
+    // Update torso position to follow hip height
+    this.torsoMesh.position.y = 0.68 + upperBodyY * 0.3;
+
+    // Shoulders - more counter-rotation than hips
+    this.shouldersMesh.rotation.y = anim.counterRotation * 1.5;
+    this.shouldersMesh.rotation.z = anim.angulation * 0.8;
+    this.shouldersMesh.position.y = 0.86 + upperBodyY * 0.4;
+
+    // === ARM ANIMATION (athletic carving stance) ===
+    // Arms held FORWARD in ready position, not hanging down
+    // Snowboarders keep arms out front for balance and control
+    const leftPose = anim.leftArmPose;
+    const rightPose = anim.rightArmPose;
+
+    // Position shoulders with body
+    this.leftShoulderPivot.position.y = 0.86 + upperBodyY * 0.4;
+    this.rightShoulderPivot.position.y = 0.86 + upperBodyY * 0.4;
+
+    // BASE ATHLETIC STANCE: Arms forward and slightly out
+    // rotation.x: negative = forward, positive = back
+    // rotation.z: positive (left) / negative (right) = out to side
+
+    // Left arm - base position: forward and slightly out
+    let leftArmForward = -0.8;  // Forward
+    let leftArmOut = 0.4;       // Slightly out from body
+    let leftElbow = 0.6;        // Relaxed bend
+
+    // Right arm - base position: forward and slightly out
+    let rightArmForward = -0.7;
+    let rightArmOut = -0.4;
+    let rightElbow = 0.6;
+
+    // === CARVING ARM ADJUSTMENTS ===
+    if (absEdge > 0.15) {
+      const carveAmount = absEdge * 1.2;
+
+      if (edgeSign > 0) {
+        // TOESIDE CARVE
+        // Lead arm (left) drops down and points into turn
+        leftArmForward = -1.0 - carveAmount * 0.3;  // More forward/down
+        leftArmOut = 0.2;                            // Closer to body
+        leftElbow = 0.3;                             // Straighter, reaching
+
+        // Trail arm (right) lifts up and back for balance
+        rightArmForward = -0.3 + carveAmount * 0.4;  // Back
+        rightArmOut = -0.6 - carveAmount * 0.2;      // Out for balance
+        rightElbow = 0.8;                             // More bent
+
+      } else {
+        // HEELSIDE CARVE
+        // Lead arm (right) points into turn
+        rightArmForward = -1.0 - carveAmount * 0.3;
+        rightArmOut = -0.2;
+        rightElbow = 0.3;
+
+        // Trail arm (left) up and back
+        leftArmForward = -0.3 + carveAmount * 0.4;
+        leftArmOut = 0.6 + carveAmount * 0.2;
+        leftElbow = 0.8;
       }
     }
 
-    // Collider mesh follows
-    this.colliderMesh.position.copy(this.mesh.position);
-    this.colliderMesh.quaternion.copy(this.mesh.quaternion);
+    // Apply arm positions
+    this.leftShoulderPivot.rotation.x = leftArmForward;
+    this.leftShoulderPivot.rotation.z = leftArmOut;
+    this.leftElbowPivot.rotation.x = leftElbow;
+
+    this.rightShoulderPivot.rotation.x = rightArmForward;
+    this.rightShoulderPivot.rotation.z = rightArmOut;
+    this.rightElbowPivot.rotation.x = rightElbow;
+
+    // Style flair - trailing arm gets extra flourish
+    if (anim.styleFlair > 0.3) {
+      const flair = (anim.styleFlair - 0.3) * 0.8;
+      if (edgeSign > 0) {
+        this.rightShoulderPivot.rotation.z -= flair * 0.3;
+        this.rightShoulderPivot.rotation.x += flair * 0.2;
+      } else if (edgeSign < 0) {
+        this.leftShoulderPivot.rotation.z += flair * 0.3;
+        this.leftShoulderPivot.rotation.x += flair * 0.2;
+      }
+    }
+
+    // === HEAD / NECK ===
+    const headY = 1.04 + upperBodyY * 0.5;
+    this.headMesh.position.y = headY;
+    this.headMesh.rotation.y = anim.headLook;
+    this.headMesh.rotation.z = anim.angulation * 0.25;
+
+    this.neckMesh.position.y = headY - 0.1;
+    this.neckMesh.rotation.y = anim.headLook * 0.5;
+
+    this.helmetMesh.position.y = headY;
+    this.goggleMesh.position.y = headY + 0.01;
+
+    // === AIR ANIMATIONS ===
+    if (!this.isGrounded) {
+      const tuckAmount = Math.max(0, this.input.lean) * 0.5;
+
+      // Pull knees up in air
+      this.frontAnklePivot.rotation.x = -0.3 - tuckAmount * 0.4;
+      this.frontKneePivot.rotation.x = 0.8 + tuckAmount * 0.5;
+
+      this.backAnklePivot.rotation.x = -0.3 - tuckAmount * 0.4;
+      this.backKneePivot.rotation.x = 0.8 + tuckAmount * 0.5;
+
+      // Arms stay forward and athletic in air
+      // Base air position: arms out for stability
+      this.leftShoulderPivot.rotation.x = -0.6;
+      this.leftShoulderPivot.rotation.z = 0.5;
+      this.leftElbowPivot.rotation.x = 0.5;
+
+      this.rightShoulderPivot.rotation.x = -0.6;
+      this.rightShoulderPivot.rotation.z = -0.5;
+      this.rightElbowPivot.rotation.x = 0.5;
+
+      // Arms tuck in for spins
+      if (Math.abs(this.headingVelocity) > 1) {
+        const spinTuck = Math.min(Math.abs(this.headingVelocity) * 0.2, 0.5);
+        // Pull arms in toward chest for faster spin
+        this.leftShoulderPivot.rotation.x = -0.8;
+        this.leftShoulderPivot.rotation.z = 0.3 - spinTuck * 0.2;
+        this.leftElbowPivot.rotation.x = 1.0;
+
+        this.rightShoulderPivot.rotation.x = -0.8;
+        this.rightShoulderPivot.rotation.z = -0.3 + spinTuck * 0.2;
+        this.rightElbowPivot.rotation.x = 1.0;
+      }
+
+      // Grab poses - reach for board
+      if (tuckAmount > 0.3 && absEdge > 0.3) {
+        if (edgeSign > 0) {
+          // Method/melon - back hand reaches down for toeside edge
+          this.rightShoulderPivot.rotation.x = 0.3;   // Down toward board
+          this.rightShoulderPivot.rotation.z = -0.6;  // Out to reach edge
+          this.rightElbowPivot.rotation.x = 0.2;      // Straight arm reaching
+        } else {
+          // Indy - front hand reaches for heelside edge
+          this.leftShoulderPivot.rotation.x = 0.3;
+          this.leftShoulderPivot.rotation.z = 0.6;
+          this.leftElbowPivot.rotation.x = 0.2;
+        }
+      }
+    }
   }
 
   setInput(key, value) {
@@ -1228,6 +2060,49 @@ export class PlayerController {
     this.wobbleAmount = 0;
     this.isRecovering = false;
     this.recoveryTime = 0;
+
+    // Reset carve failure states
+    this.isWashingOut = false;
+    this.washOutIntensity = 0;
+    this.washOutDirection = 0;
+    this.isEdgeCaught = false;
+    this.edgeCatchSeverity = 0;
+    this.edgeCatchTime = 0;
+
+    // Reset carve commitment
+    this.carveCommitment = 0;
+    this.carveDirection = 0;
+    this.carveArcProgress = 0;
+    this.carveEntrySpeed = 0;
+    this.carveEntryEdge = 0;
+    this.turnShapeQuality = 1;
+    this.lastEdgeAngleDelta = 0;
+
+    // Reset animation state
+    if (this.animState) {
+      this.animState.angulation = 0;
+      this.animState.targetAngulation = 0;
+      this.animState.counterRotation = 0;
+      this.animState.targetCounterRotation = 0;
+      this.animState.headLook = 0;
+      this.animState.targetHeadLook = 0;
+      this.animState.leftArmPose = 0;
+      this.animState.rightArmPose = 0;
+      this.animState.frontKneeAngle = 0.65;
+      this.animState.backKneeAngle = 0.65;
+      this.animState.targetFrontKnee = 0.65;
+      this.animState.targetBackKnee = 0.65;
+      this.animState.frontAnkleAngle = 0.1;
+      this.animState.backAnkleAngle = 0.1;
+      this.animState.targetFrontAnkle = 0.1;
+      this.animState.targetBackAnkle = 0.1;
+      this.animState.hipHeight = 0.5;
+      this.animState.targetHipHeight = 0.5;
+      this.animState.hipShift = 0;
+      this.animState.legSpread = 0;
+      this.animState.styleFlair = 0;
+      this.animState.gForceCompression = 1;
+    }
   }
 
   getPosition() {

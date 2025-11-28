@@ -284,6 +284,10 @@ class Game {
     flowDisplayState.riskLevel = this.player.riskLevel;
     flowDisplayState.snowCondition = this.player.currentSnowCondition;
 
+    // Add input values for balance meter
+    flowDisplayState.steer = this.player.input.steer;
+    flowDisplayState.lean = this.player.input.lean;
+
     // Add gate state if challenge is active
     if (this.challengeMode) {
       flowDisplayState.gateState = this.gateSystem.getState();
