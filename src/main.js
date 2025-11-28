@@ -121,11 +121,16 @@ class Game {
       this.player.getVelocity(),
       this.player.getHeading(),
       this.player.edgeAngle,
-      this.player.isGrounded
+      this.player.isGrounded,
+      this.player.compression,
+      this.player.wasGrounded
     );
 
     // Update UI
     this.ui.update(this.player.getSpeedKmh());
+
+    // Update shadow camera to follow player
+    this.sceneManager.updateShadowCamera(this.player.getPosition());
 
     // Render
     this.sceneManager.render(this.cameraController.camera);

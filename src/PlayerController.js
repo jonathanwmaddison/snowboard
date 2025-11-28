@@ -73,6 +73,27 @@ export class PlayerController {
     // Collider mesh for debug
     this.colliderMesh = null;
 
+    // === EDGE TRANSITION SYSTEM ===
+    this.previousEdgeSide = 0; // -1 heelside, 0 flat, +1 toeside
+    this.edgeTransitionBoost = 0; // Acceleration burst on edge switch
+    this.lastEdgeChangeTime = 0;
+
+    // === COMPRESSION SYSTEM ===
+    // Simulates rider absorbing terrain and pumping
+    this.compression = 0; // 0 = standing, 1 = fully compressed
+    this.compressionVelocity = 0;
+    this.targetCompression = 0;
+
+    // === OLLIE PRE-LOAD ===
+    this.jumpCharging = false;
+    this.jumpCharge = 0; // 0-1 charge level
+    this.maxChargeTime = 0.4; // seconds to full charge
+
+    // === CARVE MOMENTUM ===
+    // Pumping through turns builds speed
+    this.carveEnergy = 0;
+    this.lastCarveDirection = 0;
+
     // Snow spray particles
     this.sprayParticles = null;
     this.sprayPositions = null;
@@ -112,15 +133,34 @@ export class PlayerController {
     const boardMaterial = new THREE.MeshLambertMaterial({ color: 0x1a4d8c });
     this.boardMesh = new THREE.Mesh(boardGeometry, boardMaterial);
 
-    // Rider
-    const riderGeometry = new THREE.CapsuleGeometry(0.12, 0.65, 4, 8);
-    const riderMaterial = new THREE.MeshLambertMaterial({ color: 0xcc2222 });
-    const riderMesh = new THREE.Mesh(riderGeometry, riderMaterial);
-    riderMesh.position.y = 0.5;
+    // Rider - split into upper and lower body for compression animation
+    // Lower body (legs)
+    const legsGeometry = new THREE.CapsuleGeometry(0.08, 0.3, 4, 8);
+    const legsMaterial = new THREE.MeshLambertMaterial({ color: 0x222244 });
+    this.legsMesh = new THREE.Mesh(legsGeometry, legsMaterial);
+    this.legsMesh.position.y = 0.25;
+
+    // Upper body (torso)
+    const torsoGeometry = new THREE.CapsuleGeometry(0.12, 0.35, 4, 8);
+    const torsoMaterial = new THREE.MeshLambertMaterial({ color: 0xcc2222 });
+    this.torsoMesh = new THREE.Mesh(torsoGeometry, torsoMaterial);
+    this.torsoMesh.position.y = 0.6;
+
+    // Head
+    const headGeometry = new THREE.SphereGeometry(0.1, 8, 6);
+    const headMaterial = new THREE.MeshLambertMaterial({ color: 0xffcc88 });
+    this.headMesh = new THREE.Mesh(headGeometry, headMaterial);
+    this.headMesh.position.y = 0.95;
+
+    // Rider group (for compression animation)
+    this.riderGroup = new THREE.Group();
+    this.riderGroup.add(this.legsMesh);
+    this.riderGroup.add(this.torsoMesh);
+    this.riderGroup.add(this.headMesh);
 
     this.mesh = new THREE.Group();
     this.mesh.add(this.boardMesh);
-    this.mesh.add(riderMesh);
+    this.mesh.add(this.riderGroup);
     this.sceneManager.add(this.mesh);
   }
 
@@ -317,8 +357,8 @@ export class PlayerController {
     const isCarving = this.isGrounded && Math.abs(this.edgeAngle) > 0.3;
     this.updateSprayParticles(dt, this.currentSpeed, isCarving, this.edgeAngle);
 
-    // Reset if fallen
-    if (pos.y < -250) {
+    // Reset if fallen off terrain
+    if (pos.y < -100) {
       this.reset();
     }
   }
@@ -408,6 +448,17 @@ export class PlayerController {
     this.roll = 0;
     this.pitchVelocity = 0;
     this.rollVelocity = 0;
+
+    // === LANDING COMPRESSION ===
+    // Absorb impact with compression based on fall speed and quality
+    const landingCompression = Math.min(impactSpeed * 0.08, 0.7);
+    this.compression = landingCompression;
+    this.compressionVelocity = impactSpeed * 0.1; // Bounce back velocity
+
+    // Perfect landing gets a quick recovery (feels snappy)
+    if (landingQuality > 0.8) {
+      this.compressionVelocity = impactSpeed * 0.15;
+    }
   }
 
   updateGroundedPhysics(dt, pos) {
@@ -441,6 +492,63 @@ export class PlayerController {
 
     const absEdge = Math.abs(this.edgeAngle);
     const edgeSign = Math.sign(this.edgeAngle);
+
+    // === EDGE TRANSITION DETECTION ===
+    // Detect when we switch from one edge to another (the "pop")
+    const currentEdgeSide = absEdge > 0.15 ? edgeSign : 0;
+    const edgeSwitched = currentEdgeSide !== 0 &&
+                         this.previousEdgeSide !== 0 &&
+                         currentEdgeSide !== this.previousEdgeSide;
+
+    if (edgeSwitched && speed2D > 5) {
+      // Edge-to-edge transition - the satisfying "pop"!
+      // Faster transitions and higher speeds = more pop
+      const transitionSpeed = Math.abs(this.edgeAngle - this.previousEdgeSide * maxEdge);
+      const speedBonus = Math.min(speed2D / 20, 1.5);
+      this.edgeTransitionBoost = transitionSpeed * speedBonus * 3.0;
+      this.lastEdgeChangeTime = 0;
+
+      // Carve energy from good edge changes
+      this.carveEnergy = Math.min(this.carveEnergy + 0.3, 1.0);
+    }
+
+    this.previousEdgeSide = currentEdgeSide;
+    this.lastEdgeChangeTime += dt;
+
+    // === APPLY EDGE TRANSITION BOOST ===
+    if (this.edgeTransitionBoost > 0.1) {
+      // Burst of acceleration in forward direction
+      this.velocity.x += forward.x * this.edgeTransitionBoost * dt * 8;
+      this.velocity.z += forward.z * this.edgeTransitionBoost * dt * 8;
+      this.edgeTransitionBoost *= 0.85; // Decay quickly
+    }
+
+    // === COMPRESSION SYSTEM ===
+    // Compress during hard carves, extend on transitions
+    if (absEdge > 0.4) {
+      // Carving - compress into the turn
+      this.targetCompression = 0.3 + absEdge * 0.4;
+    } else if (edgeSwitched) {
+      // Edge switch - momentary extension (the "pop" feeling)
+      this.targetCompression = -0.2;
+    } else {
+      // Neutral - slight crouch for stability
+      this.targetCompression = 0.1;
+    }
+
+    // Jump charging increases compression
+    if (this.jumpCharging) {
+      this.targetCompression = 0.4 + this.jumpCharge * 0.4;
+    }
+
+    // Smooth compression with spring dynamics
+    const compressionSpring = 20;
+    const compressionDamp = 8;
+    const compressionForce = (this.targetCompression - this.compression) * compressionSpring;
+    this.compressionVelocity += compressionForce * dt;
+    this.compressionVelocity *= (1 - compressionDamp * dt);
+    this.compression += this.compressionVelocity * dt;
+    this.compression = THREE.MathUtils.clamp(this.compression, -0.3, 0.8);
 
     // === EFFECTIVE PRESSURE (simplified) ===
     this.effectivePressure = 0.8 + absEdge * 0.2;
@@ -537,11 +645,25 @@ export class PlayerController {
       this.velocity.z *= scale;
     }
 
-    // === JUMP ===
-    if (this.input.jump) {
+    // === OLLIE PRE-LOAD SYSTEM ===
+    // Holding jump charges the ollie, releasing pops
+    if (this.input.jump && !this.jumpCharging) {
+      // Start charging
+      this.jumpCharging = true;
+      this.jumpCharge = 0;
+    } else if (this.input.jump && this.jumpCharging) {
+      // Continue charging
+      this.jumpCharge = Math.min(this.jumpCharge + dt / this.maxChargeTime, 1.0);
+    } else if (!this.input.jump && this.jumpCharging) {
+      // Released - pop!
       this.initiateJump(speed2D, forward);
-      this.isGrounded = false; // Immediately become airborne
+      this.isGrounded = false;
+      this.jumpCharging = false;
+      this.jumpCharge = 0;
     }
+
+    // Decay carve energy
+    this.carveEnergy *= 0.995;
 
     // Reset air rotation when grounded
     this.pitch = THREE.MathUtils.lerp(this.pitch, 0, 5 * dt);
@@ -554,31 +676,51 @@ export class PlayerController {
   }
 
   initiateJump(speed2D, forward) {
-    // Jump power based on weight position
-    // Nose weight = smaller pop, tail weight = bigger pop (ollie style)
-    let jumpPower = 6.0;
+    // === CHARGE-BASED OLLIE ===
+    // Charge level dramatically affects pop power
+    const chargeBonus = this.jumpCharge * 4.0; // 0-4 extra meters of pop
 
+    // Base jump power
+    let jumpPower = 5.0 + chargeBonus;
+
+    // Weight position affects style
     if (this.weightForward < -0.2) {
-      // Tail pop - proper ollie
-      jumpPower = 7.5 + Math.abs(this.weightForward) * 2;
+      // Tail pop - proper ollie (best pop)
+      jumpPower += 1.5 + Math.abs(this.weightForward) * 1.5;
     } else if (this.weightForward > 0.3) {
-      // Nose pop - nollie
-      jumpPower = 5.5;
+      // Nose pop - nollie (slightly less pop)
+      jumpPower += 0.5;
     }
 
-    // Speed bonus
-    jumpPower += Math.min(speed2D * 0.04, 1.5);
+    // Speed bonus (going fast = more pop from momentum)
+    jumpPower += Math.min(speed2D * 0.05, 2.0);
+
+    // Carve energy bonus (pumping through turns builds pop)
+    jumpPower += this.carveEnergy * 2.0;
+
+    // === EXTENSION SNAP ===
+    // The "pop" - sudden extension from compression
+    const extensionSnap = this.compression * 2.0; // More compressed = more snap
+    jumpPower += extensionSnap;
 
     this.velocity.y = jumpPower;
 
-    // Forward momentum from tuck
+    // Forward momentum from tuck (pump into jump)
     if (this.input.lean > 0.2) {
-      this.velocity.x += forward.x * 1.5;
-      this.velocity.z += forward.z * 1.5;
+      const tuckBoost = 1.5 + this.jumpCharge * 1.0;
+      this.velocity.x += forward.x * tuckBoost;
+      this.velocity.z += forward.z * tuckBoost;
     }
 
-    // Carry spin momentum into air
-    this.spinVelocity = this.headingVelocity * 0.5;
+    // Carry spin momentum into air (more from charged jumps)
+    this.spinVelocity = this.headingVelocity * (0.5 + this.jumpCharge * 0.3);
+
+    // Reset compression for the extension visual
+    this.compression = -0.3;
+    this.compressionVelocity = -3; // Snap up
+
+    // Clear carve energy on jump (spent it)
+    this.carveEnergy = 0;
 
     this.input.jump = false;
   }
@@ -759,6 +901,26 @@ export class PlayerController {
     const pos = this.body.translation();
     this.mesh.position.set(pos.x, pos.y, pos.z);
 
+    // === COMPRESSION ANIMATION ===
+    // Rider squats and extends based on compression value
+    if (this.riderGroup) {
+      const compressAmount = this.compression * 0.25; // Max 0.2m of compression
+
+      // Legs compress (scale Y and lower position)
+      this.legsMesh.scale.y = 1 - this.compression * 0.4;
+      this.legsMesh.position.y = 0.25 - compressAmount * 0.5;
+
+      // Torso lowers and tilts forward slightly when compressed
+      this.torsoMesh.position.y = 0.6 - compressAmount;
+      this.torsoMesh.rotation.x = this.compression * 0.2; // Lean forward when compressed
+
+      // Head follows torso
+      this.headMesh.position.y = 0.95 - compressAmount * 1.2;
+
+      // Torso leans into carves
+      this.torsoMesh.rotation.z = this.edgeAngle * 0.15;
+    }
+
     if (this.isGrounded) {
       // === GROUNDED: Align to terrain + edge angle ===
 
@@ -815,6 +977,13 @@ export class PlayerController {
         edgeQuat.setFromAxisAngle(boardForward, this.edgeAngle);
         this.mesh.quaternion.premultiply(edgeQuat);
       }
+
+      // Tuck animation in air
+      if (this.riderGroup) {
+        // More compressed during air tuck
+        const airTuck = Math.max(0, this.input.lean) * 0.3;
+        this.torsoMesh.rotation.x = airTuck * 0.4;
+      }
     }
 
     // Collider mesh follows
@@ -858,6 +1027,24 @@ export class PlayerController {
     this.pitchVelocity = 0;
     this.rollVelocity = 0;
     this.spinVelocity = 0;
+
+    // Reset edge transition
+    this.previousEdgeSide = 0;
+    this.edgeTransitionBoost = 0;
+    this.lastEdgeChangeTime = 0;
+
+    // Reset compression
+    this.compression = 0;
+    this.compressionVelocity = 0;
+    this.targetCompression = 0;
+
+    // Reset ollie pre-load
+    this.jumpCharging = false;
+    this.jumpCharge = 0;
+
+    // Reset carve momentum
+    this.carveEnergy = 0;
+    this.lastCarveDirection = 0;
   }
 
   getPosition() {

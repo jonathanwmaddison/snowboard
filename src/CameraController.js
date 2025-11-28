@@ -13,8 +13,8 @@ export class CameraController {
     this.camera = new THREE.PerspectiveCamera(
       this.baseFOV,
       window.innerWidth / window.innerHeight,
-      0.1,
-      1500
+      0.5,
+      3000
     );
 
     // Dynamic camera positioning (changes with speed)
@@ -45,6 +45,11 @@ export class CameraController {
     this.shakeOffset = new THREE.Vector3();
     this.shakeTime = 0;
 
+    // === G-FORCE CAMERA EFFECTS ===
+    this.cameraRoll = 0; // Tilt into turns
+    this.targetCameraRoll = 0;
+    this.landingImpact = 0; // Compression on landing
+
     // Terrain-aware height
     this.terrainLookAheadHeight = 0;
 
@@ -56,12 +61,21 @@ export class CameraController {
     this.camera.updateProjectionMatrix();
   }
 
-  update(deltaTime, playerPosition, playerVelocity, playerHeading, edgeAngle = 0, isGrounded = true) {
+  update(deltaTime, playerPosition, playerVelocity, playerHeading, edgeAngle = 0, isGrounded = true, compression = 0, wasGrounded = true) {
     // Get player speed (horizontal only)
     const speed = Math.sqrt(playerVelocity.x ** 2 + playerVelocity.z ** 2);
 
     // Smooth speed for camera effects (prevents jarring changes)
     this.smoothedSpeed = THREE.MathUtils.lerp(this.smoothedSpeed, speed, 0.05);
+
+    // === LANDING IMPACT DETECTION ===
+    if (isGrounded && !wasGrounded) {
+      // Just landed - add impact
+      const impactSpeed = Math.abs(playerVelocity.y || 0);
+      this.landingImpact = Math.min(impactSpeed * 0.03, 0.4);
+    }
+    // Decay landing impact
+    this.landingImpact *= 0.9;
 
     // === SPEED-BASED DYNAMIC VALUES ===
     const speedFactor = Math.min(this.smoothedSpeed / 40, 1); // 0-1 based on 40 m/s max
@@ -81,38 +95,30 @@ export class CameraController {
     // Look further ahead at higher speeds
     this.lookAhead = THREE.MathUtils.lerp(this.baseLookAhead, this.maxLookAhead, speedFactor * 0.6);
 
-    // === HEADING SMOOTHING ===
-    // Faster smoothing at low speed, slower at high speed for stability
-    const headingLagFactor = THREE.MathUtils.lerp(0.15, 0.06, speedFactor);
+    // === HEADING - ALWAYS BEHIND PLAYER ===
+    // Camera always stays directly behind the player's heading
     let headingDiff = playerHeading - this.smoothedHeading;
     while (headingDiff > Math.PI) headingDiff -= Math.PI * 2;
     while (headingDiff < -Math.PI) headingDiff += Math.PI * 2;
-    this.smoothedHeading += headingDiff * headingLagFactor;
+    // Fast tracking to stay behind player
+    this.smoothedHeading += headingDiff * 0.25;
 
     // === CAMERA SHAKE ===
     this.updateShake(deltaTime, speed, edgeAngle, isGrounded);
 
-    // === CAMERA POSITION ===
-    // Offset slightly to the side during hard turns for better view
-    const turnOffset = edgeAngle * 0.8; // Slight lateral offset when carving
-
+    // === CAMERA POSITION - ALWAYS DIRECTLY BEHIND ===
     const behindX = -Math.sin(this.smoothedHeading) * this.distance;
     const behindZ = -Math.cos(this.smoothedHeading) * this.distance;
 
-    // Add lateral offset perpendicular to heading
-    const lateralX = Math.cos(this.smoothedHeading) * turnOffset;
-    const lateralZ = -Math.sin(this.smoothedHeading) * turnOffset;
-
-    // Target camera position
+    // Target camera position - directly behind player
     const targetPos = new THREE.Vector3(
-      playerPosition.x + behindX + lateralX,
+      playerPosition.x + behindX,
       playerPosition.y + this.height,
-      playerPosition.z + behindZ + lateralZ
+      playerPosition.z + behindZ
     );
 
-    // Speed-adaptive smoothing (smoother at high speed)
-    const posLag = THREE.MathUtils.lerp(0.08, 0.04, speedFactor);
-    this.currentPosition.lerp(targetPos, posLag);
+    // Fast position tracking to stay behind
+    this.currentPosition.lerp(targetPos, 0.15);
 
     // === KEEP CAMERA ABOVE GROUND ===
     if (this.terrain) {
@@ -123,27 +129,44 @@ export class CameraController {
       }
     }
 
-    // === LOOK AT POINT ===
+    // === LOOK AT POINT - AHEAD OF PLAYER ===
     const aheadX = Math.sin(this.smoothedHeading) * this.lookAhead;
     const aheadZ = Math.cos(this.smoothedHeading) * this.lookAhead;
 
-    // Look target slightly lower at high speed for ground focus
-    const lookHeightOffset = THREE.MathUtils.lerp(0.8, 0.3, speedFactor);
-
     const targetLookAt = new THREE.Vector3(
       playerPosition.x + aheadX,
-      playerPosition.y + lookHeightOffset,
+      playerPosition.y + 0.5,
       playerPosition.z + aheadZ
     );
 
-    // Smooth look-at
-    const lookLag = THREE.MathUtils.lerp(0.12, 0.06, speedFactor);
-    this.currentLookAt.lerp(targetLookAt, lookLag);
+    // Fast look-at tracking
+    this.currentLookAt.lerp(targetLookAt, 0.2);
 
-    // === APPLY WITH SHAKE ===
+    // === G-FORCE CAMERA ROLL ===
+    // Tilt camera into turns like a motorcycle rider
+    if (isGrounded && speed > 5) {
+      // Roll into carves - stronger at higher speeds
+      const speedRollMultiplier = Math.min(speed / 25, 1.2);
+      this.targetCameraRoll = -edgeAngle * 0.25 * speedRollMultiplier;
+    } else {
+      // In air - slight roll for style
+      this.targetCameraRoll = -edgeAngle * 0.1;
+    }
+
+    // Smooth roll transition
+    this.cameraRoll = THREE.MathUtils.lerp(this.cameraRoll, this.targetCameraRoll, 0.08);
+
+    // === APPLY WITH SHAKE AND ROLL ===
     this.camera.position.copy(this.currentPosition);
     this.camera.position.add(this.shakeOffset);
+
+    // Landing impact lowers camera temporarily
+    this.camera.position.y -= this.landingImpact;
+
     this.camera.lookAt(this.currentLookAt);
+
+    // Apply G-force roll after lookAt
+    this.camera.rotateZ(this.cameraRoll);
   }
 
   updateShake(deltaTime, speed, edgeAngle, isGrounded) {
