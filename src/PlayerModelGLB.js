@@ -166,86 +166,30 @@ export class PlayerModelGLB {
     }
   }
 
-  // Simple snowboard stance - just rotate to face sideways, minimal posing
+  // Face sideways for snowboard stance
   applySnowboardStance() {
-    if (!this.loaded) return;
+    if (!this.loaded || !this.model) return;
+    this.model.rotation.y = Math.PI / 2;
 
-    // Rotate to face sideways (snowboard stance)
-    if (this.model) {
-      this.model.rotation.y = Math.PI / 2;
-    }
-
-    // Arms relaxed at sides
+    // Arms down at sides - rotate Y to swing back to body sides
     if (this.bones.leftArm) {
-      this.bones.leftArm.rotation.z = 0.3;   // Slight outward
-      this.bones.leftArm.rotation.x = 0.1;   // Slightly forward
+      this.bones.leftArm.rotation.set(0, 1.4, 1.5);
     }
     if (this.bones.rightArm) {
-      this.bones.rightArm.rotation.z = -0.3;
-      this.bones.rightArm.rotation.x = 0.1;
+      this.bones.rightArm.rotation.set(0, -1.4, -1.5);
     }
-    if (this.bones.leftForeArm) {
-      this.bones.leftForeArm.rotation.x = 0.2;
-    }
-    if (this.bones.rightForeArm) {
-      this.bones.rightForeArm.rotation.x = 0.2;
-    }
-
-    console.log('Applied snowboard stance');
   }
 
-  // Animation - upper body only (no legs to avoid feet lifting)
+  // SIMPLE: Just tilt the whole character - no bone stuff
   applyPose(animState, edgeAngle, isGrounded) {
-    if (!this.loaded) return;
+    if (!this.loaded || !this.model) return;
 
-    const absEdge = Math.abs(edgeAngle);
-    const edgeSign = Math.sign(edgeAngle);
+    // Lean into turns - tilt whole body
+    const lean = -edgeAngle * 0.3;
 
-    // === SPINE - Lean and angulation ===
-    const angulation = (animState.angulation || 0);
-    const counterRot = (animState.counterRotation || 0);
-
-    if (this.bones.spine) {
-      this.bones.spine.rotation.x = 0.05;
-      this.bones.spine.rotation.z = angulation * 0.3;
-    }
-    if (this.bones.spine1) {
-      this.bones.spine1.rotation.z = angulation * 0.2;
-      this.bones.spine1.rotation.y = counterRot * 0.2;
-    }
-    if (this.bones.spine2) {
-      this.bones.spine2.rotation.z = angulation * 0.15;
-      this.bones.spine2.rotation.y = counterRot * 0.3;
-    }
-
-    // === HEAD - Look into turn ===
-    if (this.bones.head) {
-      this.bones.head.rotation.y = (animState.headLook || 0) * 0.4;
-    }
-
-    // === ARMS - Relaxed at sides, raise on hard carves ===
-    let leftArmOut = 0.3;
-    let rightArmOut = -0.3;
-    let leftArmFwd = 0.1;
-    let rightArmFwd = 0.1;
-
-    if (absEdge > 0.3) {
-      const armLift = (absEdge - 0.3) * 0.6;
-      if (edgeSign > 0) {
-        rightArmOut = -0.4 - armLift;
-      } else {
-        leftArmOut = 0.4 + armLift;
-      }
-    }
-
-    if (this.bones.leftArm) {
-      this.bones.leftArm.rotation.z = leftArmOut;
-      this.bones.leftArm.rotation.x = leftArmFwd;
-    }
-    if (this.bones.rightArm) {
-      this.bones.rightArm.rotation.z = rightArmOut;
-      this.bones.rightArm.rotation.x = rightArmFwd;
-    }
+    // Keep facing sideways, add lean
+    this.model.rotation.y = Math.PI / 2;
+    this.model.rotation.z = lean;
   }
 
   update(dt) {
