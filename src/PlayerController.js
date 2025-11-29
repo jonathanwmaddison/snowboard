@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { PlayerModelV2 } from './PlayerModelV2.js';
+import { PlayerModelGLB } from './PlayerModelGLB.js';
 
 export class PlayerController {
   constructor(sceneManager, physicsWorld, terrain = null) {
@@ -148,6 +150,66 @@ export class PlayerController {
     // Turn shape tracking
     this.turnShapeQuality = 1;    // 1 = perfect arc, 0 = jerky mess
     this.lastEdgeAngleDelta = 0;  // For detecting jerky input
+
+    // === ANGULATION SYSTEM ===
+    // Proper body angulation allows deeper edge hold without washing out
+    // Like bending at hips/knees to keep center of mass over the edge
+    this.angulation = 0;           // 0-1, how much body is angulating
+    this.targetAngulation = 0;
+    this.angulationCapacity = 1.0; // Degrades with fatigue/bad form
+
+    // === BOARD FLEX SYSTEM ===
+    // Board stores energy when loaded, releases on transitions
+    this.boardFlex = 0;            // Current flex amount (0-1)
+    this.flexEnergy = 0;           // Stored energy from flex
+    this.maxFlexEnergy = 1.5;      // Cap on stored energy
+    this.flexStiffness = 8;        // How quickly board flexes/rebounds
+
+    // === CARVE FLOW STATE ===
+    // "In the zone" - everything clicking
+    this.flowState = 0;            // 0-1, current flow level
+    this.flowMomentum = 0;         // Accumulated flow from perfect carves
+    this.flowDecayRate = 0.3;      // How fast flow decays without perfect carves
+    this.flowBuildRate = 0.15;     // How fast flow builds with perfect carves
+
+    // === ARC SHAPE TRACKING ===
+    // C-turn (complete) vs J-turn (early exit) vs S-wiggle (no commitment)
+    this.arcHeadingChange = 0;     // Total heading change in current arc
+    this.arcStartHeading = 0;      // Heading when arc started
+    this.arcType = 'none';         // 'c-turn', 'j-turn', 'wiggle', 'none'
+
+    // === EDGE BITE PROGRESSION ===
+    // Edge grip builds over time during sustained carve
+    this.edgeBite = 0;             // Current edge grip progression (0-1)
+    this.edgeBiteRate = 2.0;       // How fast bite builds
+    this.maxEdgeBite = 1.0;        // Maximum additional grip from bite
+
+    // === SMOOTHING SYSTEMS ===
+    // Track velocities for spring-damper smoothing (eliminates choppiness)
+    this.edgeVelocity = 0;         // Rate of edge angle change
+    this.turnInertia = 0;          // Accumulated turn momentum
+    this.smoothedGrip = 0.7;       // Smoothed grip value (prevents sudden grip changes)
+    this.lastAbsEdge = 0;          // For tracking edge rate of change
+    this.smoothedRailStrength = 0; // Smoothed rail strength
+
+    // Turn rhythm tracking
+    this.turnRhythm = 0;           // 0-1, how "in rhythm" the carving is
+    this.rhythmPhase = 0;          // Current phase in the carve cycle
+
+    // === GRINDING SYSTEM ===
+    this.isGrinding = false;
+    this.grindRail = null;         // Current rail being ground
+    this.grindProgress = 0;        // 0-1 progress along rail
+    this.grindBalance = 0;         // -1 to 1, must stay near 0
+    this.grindTime = 0;            // Time spent on this grind
+    this.grindSparks = [];         // Spark particle data
+
+    // === MODEL VERSION ===
+    // 1 = original simple model, 2 = realistic detailed model, 3 = external GLB model
+    this.modelVersion = 2;  // Default to V2 realistic model
+    this.playerModelV2 = null;
+    this.playerModelGLB = null;
+    this.glbModelUrl = null;  // URL for external GLB model
   }
 
   init(startPosition) {
@@ -176,6 +238,17 @@ export class PlayerController {
   }
 
   createVisualMesh() {
+    if (this.modelVersion === 2) {
+      this.createVisualMeshV2();
+      return;
+    }
+
+    if (this.modelVersion === 3 && this.playerModelGLB) {
+      this.createVisualMeshGLB();
+      return;
+    }
+
+    // === V1 MODEL (original simple) ===
     // === BOARD ===
     const boardGeometry = new THREE.BoxGeometry(this.boardWidth, 0.03, this.boardLength);
     const boardMaterial = new THREE.MeshLambertMaterial({ color: 0x1a4d8c });
@@ -433,6 +506,263 @@ export class PlayerController {
     this.sceneManager.add(this.mesh);
   }
 
+  createVisualMeshV2() {
+    // === V2 REALISTIC MODEL ===
+    this.playerModelV2 = new PlayerModelV2();
+
+    // Get dimensions from V2 model for animation compatibility
+    const dims = this.playerModelV2.getDimensions();
+    this.thighLength = dims.thighLength;
+    this.shinLength = dims.shinLength;
+    this.bootHeight = dims.bootHeight;
+
+    // Reference V2 model components for animation system
+    // Board
+    this.boardMesh = this.playerModelV2.boardGroup;
+
+    // Rider group
+    this.riderGroup = this.playerModelV2.riderGroup;
+
+    // Lower body
+    this.lowerBodyGroup = this.playerModelV2.lowerBodyGroup;
+    this.frontBoot = this.playerModelV2.frontBoot;
+    this.backBoot = this.playerModelV2.backBoot;
+    this.frontAnklePivot = this.playerModelV2.frontAnklePivot;
+    this.backAnklePivot = this.playerModelV2.backAnklePivot;
+    this.frontKneePivot = this.playerModelV2.frontKneePivot;
+    this.backKneePivot = this.playerModelV2.backKneePivot;
+    this.frontShin = this.playerModelV2.frontShin;
+    this.backShin = this.playerModelV2.backShin;
+    this.frontThigh = this.playerModelV2.frontThigh;
+    this.backThigh = this.playerModelV2.backThigh;
+    this.frontKnee = this.playerModelV2.frontKnee;
+    this.backKnee = this.playerModelV2.backKnee;
+    this.hipsMesh = this.playerModelV2.hipsMesh;
+
+    // Upper body
+    this.upperBodyGroup = this.playerModelV2.upperBodyGroup;
+    this.torsoMesh = this.playerModelV2.torsoMesh;
+    this.shouldersMesh = this.playerModelV2.shouldersMesh;
+    this.leftShoulderPivot = this.playerModelV2.leftShoulderPivot;
+    this.rightShoulderPivot = this.playerModelV2.rightShoulderPivot;
+    this.leftUpperArm = this.playerModelV2.leftUpperArm;
+    this.rightUpperArm = this.playerModelV2.rightUpperArm;
+    this.leftElbowPivot = this.playerModelV2.leftElbowPivot;
+    this.rightElbowPivot = this.playerModelV2.rightElbowPivot;
+    this.leftForearm = this.playerModelV2.leftForearm;
+    this.rightForearm = this.playerModelV2.rightForearm;
+    this.leftHand = this.playerModelV2.leftHand;
+    this.rightHand = this.playerModelV2.rightHand;
+    this.neckMesh = this.playerModelV2.neckMesh;
+    this.headMesh = this.playerModelV2.headMesh;
+    this.helmetMesh = this.playerModelV2.helmetMesh;
+    this.goggleMesh = this.playerModelV2.goggleMesh;
+
+    // For V2, torsoMesh is inside torsoGroup, so we reference the group
+    this.torsoGroup = this.playerModelV2.torsoGroup;
+    this.headGroup = this.playerModelV2.headGroup;
+    this.pelvisGroup = this.playerModelV2.pelvisGroup;
+
+    // === ANIMATION STATE (same as V1) ===
+    this.animState = {
+      angulation: 0,
+      targetAngulation: 0,
+      counterRotation: 0,
+      targetCounterRotation: 0,
+      headLook: 0,
+      targetHeadLook: 0,
+      leftArmPose: 0,
+      rightArmPose: 0,
+      frontKneeAngle: 0.65,
+      backKneeAngle: 0.65,
+      targetFrontKnee: 0.65,
+      targetBackKnee: 0.65,
+      frontAnkleAngle: 0.1,
+      backAnkleAngle: 0.1,
+      targetFrontAnkle: 0.1,
+      targetBackAnkle: 0.1,
+      hipHeight: 0.5,
+      targetHipHeight: 0.5,
+      hipShift: 0,
+      legSpread: 0,
+      styleFlair: 0,
+      gForceCompression: 0
+    };
+
+    // Main mesh group
+    this.mesh = this.playerModelV2.mesh;
+    this.sceneManager.add(this.mesh);
+  }
+
+  createVisualMeshGLB() {
+    // === V3 GLB MODEL (external rigged character) ===
+    if (!this.playerModelGLB || !this.playerModelGLB.loaded) {
+      console.warn('GLB model not loaded, falling back to V2');
+      this.modelVersion = 2;
+      this.createVisualMeshV2();
+      return;
+    }
+
+    // Create a simple board to go with the character
+    const boardGeometry = new THREE.BoxGeometry(0.26, 0.012, 1.55);
+    const boardMaterial = new THREE.MeshStandardMaterial({
+      color: 0x1a1a2e,
+      roughness: 0.4,
+      metalness: 0.2,
+    });
+    this.boardMesh = new THREE.Mesh(boardGeometry, boardMaterial);
+
+    // Animation state (same structure as V1/V2)
+    this.animState = {
+      angulation: 0,
+      targetAngulation: 0,
+      counterRotation: 0,
+      targetCounterRotation: 0,
+      headLook: 0,
+      targetHeadLook: 0,
+      leftArmPose: 0,
+      rightArmPose: 0,
+      frontKneeAngle: 0.65,
+      backKneeAngle: 0.65,
+      targetFrontKnee: 0.65,
+      targetBackKnee: 0.65,
+      frontAnkleAngle: 0.1,
+      backAnkleAngle: 0.1,
+      targetFrontAnkle: 0.1,
+      targetBackAnkle: 0.1,
+      hipHeight: 0.5,
+      targetHipHeight: 0.5,
+      hipShift: 0,
+      legSpread: 0,
+      styleFlair: 0,
+      gForceCompression: 0,
+      carveRailStrength: 0
+    };
+
+    // Combine board and character
+    this.mesh = new THREE.Group();
+    this.mesh.add(this.boardMesh);
+
+    // Position character on board (board top is at 0.006m)
+    const characterGroup = this.playerModelGLB.mesh;
+    characterGroup.position.set(0, 0.006, 0);  // Feet exactly on board top
+    characterGroup.rotation.set(0, 0, 0);
+    this.mesh.add(characterGroup);
+
+    // Set up dummy groups for compatibility
+    this.riderGroup = characterGroup;
+    this.lowerBodyGroup = new THREE.Group();
+    this.upperBodyGroup = new THREE.Group();
+
+    // Apply initial snowboard stance pose
+    this.playerModelGLB.applySnowboardStance();
+
+    this.sceneManager.add(this.mesh);
+    console.log('GLB mesh added to scene, children:', this.mesh.children.length);
+  }
+
+  toggleModelVersion() {
+    // Clean up current model
+    if (this.mesh) {
+      this.sceneManager.scene.remove(this.mesh);
+      if (this.playerModelV2) {
+        this.playerModelV2.dispose();
+        this.playerModelV2 = null;
+      }
+      if (this.playerModelGLB) {
+        this.playerModelGLB.dispose();
+        this.playerModelGLB = null;
+      }
+    }
+
+    // Toggle version: 1 -> 2 -> 3 -> 1
+    // Only go to 3 if a GLB model URL is set
+    if (this.modelVersion === 1) {
+      this.modelVersion = 2;
+    } else if (this.modelVersion === 2 && this.glbModelUrl) {
+      this.modelVersion = 3;
+    } else {
+      this.modelVersion = 1;
+    }
+
+    // Create new model
+    this.createVisualMesh();
+
+    // Re-sync position
+    if (this.body) {
+      const pos = this.body.translation();
+      this.mesh.position.set(pos.x, pos.y, pos.z);
+      this.mesh.rotation.y = this.heading;
+    }
+
+    console.log(`Switched to player model V${this.modelVersion}`);
+    return this.modelVersion;
+  }
+
+  async loadGLBModel(url) {
+    console.log('Loading GLB model:', url);
+    this.glbModelUrl = url;
+
+    // Clean up existing models
+    if (this.mesh) {
+      this.sceneManager.scene.remove(this.mesh);
+      this.mesh = null;
+    }
+    if (this.playerModelV2) {
+      this.playerModelV2.dispose();
+      this.playerModelV2 = null;
+    }
+    if (this.playerModelGLB) {
+      this.playerModelGLB.dispose();
+      this.playerModelGLB = null;
+    }
+
+    // Load the new model
+    this.playerModelGLB = new PlayerModelGLB();
+    await this.playerModelGLB.load(url);
+
+    console.log('GLB loaded, mapped bones:', Object.keys(this.playerModelGLB.bones));
+
+    // Switch to GLB mode
+    this.modelVersion = 3;
+    this.createVisualMeshGLB();
+
+    // Re-sync position
+    if (this.body) {
+      const pos = this.body.translation();
+      this.mesh.position.set(pos.x, pos.y, pos.z);
+      this.mesh.rotation.y = this.heading;
+    }
+
+    console.log('GLB model loaded and active at position:', this.mesh.position);
+    return this.playerModelGLB;
+  }
+
+  // Customization methods for V2 model
+  setJacketColor(color) {
+    if (this.playerModelV2) {
+      this.playerModelV2.setJacketColor(color);
+    }
+  }
+
+  setPantsColor(color) {
+    if (this.playerModelV2) {
+      this.playerModelV2.setPantsColor(color);
+    }
+  }
+
+  setHelmetColor(color) {
+    if (this.playerModelV2) {
+      this.playerModelV2.setHelmetColor(color);
+    }
+  }
+
+  setGoggleLensColor(color) {
+    if (this.playerModelV2) {
+      this.playerModelV2.setGoggleLensColor(color);
+    }
+  }
+
   createColliderMesh() {
     const geometry = new THREE.BoxGeometry(0.6, 0.2, 1.2);
     const material = new THREE.MeshBasicMaterial({
@@ -585,12 +915,34 @@ export class PlayerController {
     // Track previous grounded state
     this.wasGrounded = this.isGrounded;
 
-    // Ground detection
-    this.checkGround(pos);
+    // Ground detection - but skip if we're moving upward (just jumped)
+    if (this.velocity.y <= 0) {
+      this.checkGround(pos);
+    } else {
+      // Rising - definitely not grounded
+      this.isGrounded = false;
+    }
 
     // Landing detection
     if (this.isGrounded && !this.wasGrounded) {
       this.onLanding(dt);
+    }
+
+    // === GRIND RAIL DETECTION ===
+    if (this.terrain && !this.isGrounded) {
+      const railInfo = this.terrain.getRailAt(pos.x, pos.y, pos.z);
+      if (railInfo && !this.isGrinding) {
+        // Check if we're landing on the rail (descending or close enough)
+        if (this.velocity.y <= 0 || Math.abs(pos.y - railInfo.railY) < 0.3) {
+          this.startGrind(railInfo);
+        }
+      }
+    }
+
+    // Handle grinding physics
+    if (this.isGrinding) {
+      this.updateGrindPhysics(dt, pos);
+      return; // Skip normal physics while grinding
     }
 
     if (this.isGrounded) {
@@ -599,13 +951,38 @@ export class PlayerController {
 
       // Very stable ground following - just stay on ground
       const targetY = this.groundHeight + 0.15;
-      this.velocity.y = 0;
 
-      this.body.setNextKinematicTranslation({
-        x: pos.x + this.velocity.x * dt,
-        y: targetY, // Snap directly to ground - no bounce
-        z: pos.z + this.velocity.z * dt
-      });
+      // Smooth ground following - prevent sudden Y jumps
+      const yChange = targetY - pos.y;
+      const maxYChangePerFrame = 0.3; // Max smooth ground change per frame
+
+      let newY;
+      if (Math.abs(yChange) > maxYChangePerFrame) {
+        // Terrain changed too suddenly - smooth it out
+        // Follow gradually rather than teleporting
+        newY = pos.y + Math.sign(yChange) * maxYChangePerFrame;
+      } else {
+        // Normal smooth ground following
+        newY = targetY;
+      }
+
+      // Only zero Y velocity if we didn't just jump
+      // (jumping sets isGrounded = false and velocity.y > 0)
+      if (this.isGrounded) {
+        this.velocity.y = 0;
+        this.body.setNextKinematicTranslation({
+          x: pos.x + this.velocity.x * dt,
+          y: newY,
+          z: pos.z + this.velocity.z * dt
+        });
+      } else {
+        // We just jumped - let the air physics handle it next frame
+        this.body.setNextKinematicTranslation({
+          x: pos.x + this.velocity.x * dt,
+          y: pos.y + this.velocity.y * dt,
+          z: pos.z + this.velocity.z * dt
+        });
+      }
     } else {
       this.updateAirPhysics(dt, pos);
 
@@ -752,21 +1129,99 @@ export class PlayerController {
       Math.sin(this.heading)
     );
 
-    // === WEIGHT TRANSFER (simplified) ===
-    this.weightForward = THREE.MathUtils.lerp(this.weightForward, this.input.lean * 0.8, 8 * dt);
+    // === WEIGHT TRANSFER (smooth) ===
+    this.weightForward = THREE.MathUtils.lerp(this.weightForward, this.input.lean * 0.8, 6 * dt);
 
-    // === EDGE ANGLE - direct and responsive ===
+    // === DIRECT EDGE CONTROL (v2 simplified) ===
+    // Steer input directly controls edge angle - simple and responsive
     const maxEdge = 1.15; // ~66 degrees max - deep carves!
-    this.targetEdgeAngle = this.input.steer * maxEdge;
 
-    // Fast edge response - faster at low speeds, slightly slower when railing
-    const baseEdgeLerpSpeed = 15;
-    const railSlowdown = this.carveRailStrength * 0.3; // Rail mode stabilizes edge
-    const edgeLerpSpeed = baseEdgeLerpSpeed * (1 - railSlowdown);
-    this.edgeAngle = THREE.MathUtils.lerp(this.edgeAngle, this.targetEdgeAngle, edgeLerpSpeed * dt);
+    // Target edge from steer input
+    // Lean forward slightly increases edge commitment (optional modifier)
+    const leanBonus = this.input.lean > 0 ? this.input.lean * 0.1 : 0;
+    this.targetEdgeAngle = this.input.steer * maxEdge * (1 + leanBonus);
+
+    // Spring-damper for edge angle (smooth, physical feel)
+    const edgeSpring = 70;  // Snappier response
+    const edgeDamp = 8 + this.smoothedRailStrength * 5;
+
+    const edgeError = this.targetEdgeAngle - this.edgeAngle;
+    const springForce = edgeError * edgeSpring;
+    const dampForce = -this.edgeVelocity * edgeDamp;
+    const edgeAccel = springForce + dampForce;
+
+    this.edgeVelocity += edgeAccel * dt;
+    this.edgeAngle += this.edgeVelocity * dt;
+
+    // Soft clamp edge angle
+    if (Math.abs(this.edgeAngle) > maxEdge) {
+      this.edgeAngle = Math.sign(this.edgeAngle) * maxEdge;
+      this.edgeVelocity *= 0.5;
+    }
 
     const absEdge = Math.abs(this.edgeAngle);
     const edgeSign = Math.sign(this.edgeAngle);
+
+    // Track edge rate of change for smoothness detection
+    const edgeChangeRate = Math.abs(absEdge - this.lastAbsEdge) / dt;
+    this.lastAbsEdge = absEdge;
+
+    // === ANGULATION SYSTEM ===
+    // Proper angulation lets you hold deeper edges without washing out
+    // High speed + deep edge REQUIRES angulation to stay balanced
+    const angulationNeeded = (absEdge * speed2D) / 25;
+    this.targetAngulation = Math.min(angulationNeeded, 1.0);
+
+    // Angulation capacity based on SMOOTHNESS of edge changes (not absolute position)
+    // Jerky/rapid edge changes = bad form = reduced capacity
+    const smoothnessThreshold = 3.0; // rad/s - above this is "jerky"
+    if (edgeChangeRate > smoothnessThreshold) {
+      // Jerky input degrades angulation capacity
+      const jerkPenalty = (edgeChangeRate - smoothnessThreshold) * 0.3 * dt;
+      this.angulationCapacity = Math.max(0.4, this.angulationCapacity - jerkPenalty);
+    } else {
+      // Smooth carving restores capacity
+      this.angulationCapacity = Math.min(1.0, this.angulationCapacity + 0.8 * dt);
+    }
+
+    // Angulation follows target smoothly (spring-damper would be overkill here)
+    const effectiveTargetAng = this.targetAngulation * this.angulationCapacity;
+    this.angulation = THREE.MathUtils.lerp(this.angulation, effectiveTargetAng, 4 * dt);
+
+    // === BOARD FLEX SYSTEM ===
+    // Board flexes under carving load - stores energy for transitions
+    const carveLoad = absEdge * speed2D * 0.02 * (1 + this.carveRailStrength);
+    const targetFlex = Math.min(carveLoad, 1.0);
+
+    // Flex builds during carves
+    this.boardFlex = THREE.MathUtils.lerp(this.boardFlex, targetFlex, this.flexStiffness * dt);
+
+    // Accumulate flex energy (like winding a spring)
+    if (this.boardFlex > 0.2 && absEdge > 0.4) {
+      const energyGain = this.boardFlex * this.carvePerfection * dt * 0.8;
+      this.flexEnergy = Math.min(this.flexEnergy + energyGain, this.maxFlexEnergy);
+    }
+
+    // === ARC SHAPE TRACKING ===
+    // Track total heading change to determine turn shape
+    if (absEdge > 0.3) {
+      if (this.arcHeadingChange === 0) {
+        // Starting new arc
+        this.arcStartHeading = this.heading;
+      }
+      this.arcHeadingChange = Math.abs(this.normalizeAngle(this.heading - this.arcStartHeading));
+    }
+
+    // === EDGE BITE PROGRESSION ===
+    // Edge grip builds over time as edge "bites" into snow
+    if (absEdge > this.carveRailThreshold && this.smoothedRailStrength > 0.3) {
+      // Bite builds faster with good angulation and perfection
+      const biteGain = this.edgeBiteRate * this.angulation * this.carvePerfection * dt;
+      this.edgeBite = Math.min(this.edgeBite + biteGain, this.maxEdgeBite);
+    } else {
+      // Bite decays SMOOTHLY when not in deep carve (not exponential - linear is smoother)
+      this.edgeBite = Math.max(0, this.edgeBite - 1.5 * dt);
+    }
 
     // Track peak edge angle for this carve
     if (absEdge > this.peakEdgeAngle) {
@@ -898,28 +1353,95 @@ export class PlayerController {
       const transitionSpeed = Math.abs(this.edgeAngle - this.previousEdgeSide * maxEdge);
       const speedBonus = Math.min(speed2D / 20, 1.5);
 
+      // === TRANSITION TIMING SWEET SPOT ===
+      // There's an optimal rhythm to carving - not too fast, not too slow
+      // Sweet spot: 0.5-1.2 seconds between transitions
+      // Too fast (<0.4s): rushing, not completing arcs properly
+      // Too slow (>1.5s): losing momentum, stalling in the turn
+      const timeSinceLastSwitch = this.lastEdgeChangeTime;
+      let timingMultiplier = 1.0;
+
+      if (timeSinceLastSwitch < 0.3) {
+        // Way too fast - panic wiggling
+        timingMultiplier = 0.4;
+      } else if (timeSinceLastSwitch < 0.5) {
+        // Slightly rushed
+        timingMultiplier = 0.7 + (timeSinceLastSwitch - 0.3) * 1.5; // 0.7 -> 1.0
+      } else if (timeSinceLastSwitch <= 1.2) {
+        // Sweet spot! Optimal timing
+        // Peak at 0.8s (sweet spot center)
+        const sweetSpotCenter = 0.8;
+        const distFromCenter = Math.abs(timeSinceLastSwitch - sweetSpotCenter);
+        timingMultiplier = 1.0 + (0.35 - distFromCenter) * 0.5; // Up to 1.175 bonus
+      } else if (timeSinceLastSwitch <= 1.8) {
+        // A bit slow - losing some momentum
+        timingMultiplier = 1.0 - (timeSinceLastSwitch - 1.2) * 0.5; // 1.0 -> 0.7
+      } else {
+        // Too slow - stalled, lost the rhythm
+        timingMultiplier = 0.5;
+      }
+
+      // === ARC SHAPE DETERMINATION ===
+      // C-turn: >60° heading change (full carve)
+      // J-turn: 30-60° (partial, early exit)
+      // Wiggle: <30° (uncommitted)
+      const headingDeg = this.arcHeadingChange * (180 / Math.PI);
+      if (headingDeg > 60) {
+        this.arcType = 'c-turn';
+      } else if (headingDeg > 30) {
+        this.arcType = 'j-turn';
+      } else {
+        this.arcType = 'wiggle';
+      }
+
+      // Arc shape affects rewards
+      const arcShapeMultiplier = this.arcType === 'c-turn' ? 1.3 :
+                                  this.arcType === 'j-turn' ? 1.0 : 0.5;
+
       // === CARVE CHAIN BONUS ===
       // Consecutive clean carves build multiplier
       const cleanCarve = this.peakEdgeAngle > 0.5 && this.carveHoldTime > 0.3;
       const completedArc = this.carveArcProgress > 0.25;
+      const goodTiming = timingMultiplier > 0.9; // Good timing to count for chain
 
-      if (cleanCarve && completedArc) {
+      if (cleanCarve && completedArc && this.arcType !== 'wiggle' && goodTiming) {
         this.carveChainCount = Math.min(this.carveChainCount + 1, 10);
-      } else if (!cleanCarve) {
+
+        // === FLOW STATE UPDATE ===
+        // Perfect carves with good arc AND good timing build flow
+        const flowGain = this.flowBuildRate * arcShapeMultiplier * timingMultiplier *
+                         (1 + this.carvePerfection);
+        this.flowMomentum = Math.min(this.flowMomentum + flowGain, 1.5);
+      } else if (!cleanCarve || this.arcType === 'wiggle') {
         this.carveChainCount = Math.max(0, this.carveChainCount - 1);
+        // Bad carves hurt flow
+        this.flowMomentum = Math.max(0, this.flowMomentum - 0.2);
+      } else if (!goodTiming) {
+        // Timing was off but carve was ok - small penalty
+        this.flowMomentum = Math.max(0, this.flowMomentum - 0.1);
       }
 
       // Chain multiplier: 1.0 at 0, up to 2.0 at 10 chains
       const chainMultiplier = 1.0 + this.carveChainCount * 0.1;
 
-      // Calculate the boost (reduced if didn't complete arc)
+      // === FLEX ENERGY RELEASE ===
+      // Board flex releases stored energy as extra pop!
+      const flexBoost = this.flexEnergy * 2.5;
+
+      // Calculate the boost (reduced if didn't complete arc or bad timing)
       const arcBonus = completedArc ? 1.0 : 0.5;
-      this.edgeTransitionBoost = transitionSpeed * speedBonus * 3.5 * chainMultiplier * arcBonus;
+      this.edgeTransitionBoost = (transitionSpeed * speedBonus * 3.5 + flexBoost) *
+                                  chainMultiplier * arcBonus * arcShapeMultiplier *
+                                  timingMultiplier * (1 + this.flowState * 0.3);
       this.lastEdgeChangeTime = 0;
 
       // Carve energy from good edge changes - more from deep carves
       const carveQuality = Math.min(1, this.peakEdgeAngle / 0.8) * arcBonus;
       this.carveEnergy = Math.min(this.carveEnergy + 0.3 * carveQuality * chainMultiplier, 1.5);
+
+      // Release flex energy on transition (spent on the pop)
+      this.flexEnergy *= 0.3; // Keep some residual
+      this.boardFlex = 0; // Board snaps back
 
       // Reset carve tracking for next carve
       this.peakEdgeAngle = 0;
@@ -927,6 +1449,8 @@ export class PlayerController {
       this.carveRailStrength = 0;
       this.carveCommitment = 0;
       this.carveArcProgress = 0;
+      this.arcHeadingChange = 0;
+      this.edgeBite = 0; // Reset bite for new edge
     }
 
     this.previousEdgeSide = currentEdgeSide;
@@ -942,20 +1466,34 @@ export class PlayerController {
       this.carveRailStrength = THREE.MathUtils.lerp(this.carveRailStrength, targetRail, 3 * dt);
 
       // Track carve perfection (how steady the edge is held)
-      const edgeStability = 1 - Math.abs(this.edgeAngle - this.targetEdgeAngle) * 2;
-      this.carvePerfection = THREE.MathUtils.lerp(this.carvePerfection, edgeStability, 2 * dt);
+      // Use edge velocity for smoothness detection (lower = more perfect)
+      const edgeStability = Math.max(0, 1 - Math.abs(this.edgeVelocity) * 0.5);
+      this.carvePerfection = THREE.MathUtils.lerp(this.carvePerfection, edgeStability, 3 * dt);
     } else {
-      // Not in deep carve - decay rail
-      this.carveRailStrength *= Math.pow(0.1, dt);
-      this.carvePerfection *= 0.95;
+      // Not in deep carve - decay rail SMOOTHLY (linear, not exponential)
+      this.carveRailStrength = Math.max(0, this.carveRailStrength - 2.0 * dt);
+      this.carvePerfection = Math.max(0, this.carvePerfection - 1.5 * dt);
     }
 
+    // Smooth the rail strength for use in other systems (prevents choppiness)
+    this.smoothedRailStrength = THREE.MathUtils.lerp(
+      this.smoothedRailStrength,
+      this.carveRailStrength,
+      5 * dt
+    );
+
     // === APPLY EDGE TRANSITION BOOST ===
-    if (this.edgeTransitionBoost > 0.1) {
-      // Burst of acceleration in forward direction
-      this.velocity.x += forward.x * this.edgeTransitionBoost * dt * 8;
-      this.velocity.z += forward.z * this.edgeTransitionBoost * dt * 8;
-      this.edgeTransitionBoost *= 0.85; // Decay quickly
+    // Smooth application over time for buttery feel
+    if (this.edgeTransitionBoost > 0.05) {
+      // Burst of acceleration in forward direction - spread over frames
+      const boostApplication = this.edgeTransitionBoost * dt * 6;
+      this.velocity.x += forward.x * boostApplication;
+      this.velocity.z += forward.z * boostApplication;
+
+      // Smooth exponential decay
+      this.edgeTransitionBoost *= Math.pow(0.15, dt); // Smooth decay over ~0.3s
+    } else {
+      this.edgeTransitionBoost = 0;
     }
 
     // === COMPRESSION SYSTEM ===
@@ -965,27 +1503,35 @@ export class PlayerController {
       ? (speed2D * absEdge) / 15
       : 0;
 
+    // Calculate ideal target compression
+    let idealCompression = 0.1; // Default neutral
+
     if (absEdge > 0.4) {
       // Carving - compress into the turn based on G-forces
       const gCompression = Math.min(carveGForce * 0.3, 0.4);
-      this.targetCompression = 0.25 + absEdge * 0.35 + gCompression;
+      idealCompression = 0.25 + absEdge * 0.35 + gCompression;
     } else if (edgeSwitched) {
       // Edge switch - momentary extension (the "pop" feeling)
-      // Bigger pop from deeper previous carve
-      this.targetCompression = -0.25 - this.carveEnergy * 0.15;
-    } else {
-      // Neutral - slight crouch for stability
-      this.targetCompression = 0.1;
+      // Bigger pop from deeper previous carve + flex energy
+      idealCompression = -0.25 - this.carveEnergy * 0.15 - this.flexEnergy * 0.1;
     }
 
     // Jump charging increases compression
     if (this.jumpCharging) {
-      this.targetCompression = 0.4 + this.jumpCharge * 0.4;
+      idealCompression = 0.4 + this.jumpCharge * 0.4;
     }
 
+    // Smoothly approach target compression (prevents jarring changes)
+    const compressionApproachRate = edgeSwitched ? 15 : 6; // Faster for pop, slower otherwise
+    this.targetCompression = THREE.MathUtils.lerp(
+      this.targetCompression,
+      idealCompression,
+      compressionApproachRate * dt
+    );
+
     // Smooth compression with spring dynamics
-    const compressionSpring = 20;
-    const compressionDamp = 8;
+    const compressionSpring = 18;  // Slightly softer spring
+    const compressionDamp = 7;
     const compressionForce = (this.targetCompression - this.compression) * compressionSpring;
     this.compressionVelocity += compressionForce * dt;
     this.compressionVelocity *= (1 - compressionDamp * dt);
@@ -995,7 +1541,7 @@ export class PlayerController {
     // === EFFECTIVE PRESSURE (simplified) ===
     this.effectivePressure = 0.8 + absEdge * 0.2;
 
-    // === CARVED TURN PHYSICS ===
+    // === CARVED TURN PHYSICS WITH INERTIA ===
     if (speed2D > 0.5) {
       let targetAngularVel = 0;
 
@@ -1010,17 +1556,55 @@ export class PlayerController {
         targetAngularVel = baseAngularVel * edgeSign;
       }
 
-      // Responsive angular velocity
-      this.headingVelocity = THREE.MathUtils.lerp(this.headingVelocity, targetAngularVel, 10 * dt);
+      // === TURN INERTIA SYSTEM ===
+      // The board has rotational momentum - doesn't instantly change turn rate
+      // More inertia at higher speeds (harder to change direction when fast)
+      const speedInertia = 1 + speed2D * 0.03; // 1.0 at 0 m/s, ~2.5 at 50 m/s
 
-      // Clamp max turn rate
-      this.headingVelocity = THREE.MathUtils.clamp(this.headingVelocity, -3.5, 3.5);
+      // Rail mode increases inertia (you're locked into the turn arc)
+      const railInertia = 1 + this.smoothedRailStrength * 0.8;
+
+      // Combined inertia factor affects how quickly turn rate can change
+      const totalInertia = speedInertia * railInertia;
+
+      // Smooth turn rate change based on inertia (higher = slower response)
+      const turnResponseRate = 8 / totalInertia;
+
+      // Track turn momentum - builds up during sustained turns
+      if (Math.abs(targetAngularVel) > 0.3) {
+        // Building turn momentum
+        const momentumBuild = Math.sign(targetAngularVel) * 0.5 * dt;
+        this.turnInertia = THREE.MathUtils.clamp(
+          this.turnInertia + momentumBuild,
+          -1, 1
+        );
+      } else {
+        // Decay momentum when not turning hard
+        this.turnInertia *= (1 - 2 * dt);
+      }
+
+      // Turn momentum contributes to angular velocity (sustains turn through transitions)
+      const momentumContribution = this.turnInertia * 0.3;
+
+      // Apply smooth turn rate change
+      this.headingVelocity = THREE.MathUtils.lerp(
+        this.headingVelocity,
+        targetAngularVel + momentumContribution,
+        turnResponseRate * dt
+      );
+
+      // Soft clamp max turn rate (with smooth falloff, not hard cutoff)
+      const maxTurnRate = 3.5;
+      if (Math.abs(this.headingVelocity) > maxTurnRate) {
+        this.headingVelocity *= 0.95; // Gentle reduction
+      }
 
       this.heading += this.headingVelocity * dt;
     } else {
-      // Slow speed - direct pivot
-      this.headingVelocity *= 0.8;
-      this.heading += this.input.steer * 3.0 * dt;
+      // Slow speed - direct pivot but still smooth
+      this.headingVelocity *= 0.85;
+      this.heading += this.input.steer * 2.5 * dt;
+      this.turnInertia *= 0.9; // Decay momentum
     }
 
     // === GRAVITY / SLOPE ===
@@ -1043,6 +1627,14 @@ export class PlayerController {
       this.currentSnowCondition = this.terrain.getSnowCondition(pos.x, pos.z);
     }
 
+    // === FLOW STATE UPDATE ===
+    // Flow builds from momentum, decays over time
+    const targetFlow = Math.min(this.flowMomentum, 1.0);
+    this.flowState = THREE.MathUtils.lerp(this.flowState, targetFlow, 3 * dt);
+
+    // Flow momentum decays when not being refreshed by good carves
+    this.flowMomentum = Math.max(0, this.flowMomentum - this.flowDecayRate * dt);
+
     // === GRIP SYSTEM (enhanced for carving + snow conditions) ===
     const baseGrip = 0.7;
     const edgeGrip = absEdge * 0.3; // More grip from deeper edges
@@ -1050,52 +1642,50 @@ export class PlayerController {
     // Rail mode adds significant extra grip - you're locked in!
     const railGrip = this.carveRailStrength * 0.15;
 
-    // === SPEED-EDGE COUPLING ===
-    // Deep edges require speed to sustain (centrifugal force physics)
-    // High speeds require edge angle to hold grip
+    // === EDGE BITE BONUS ===
+    // Progressive grip from sustained edge engagement
+    const biteGrip = this.edgeBite * 0.12;
+
+    // === ANGULATION BONUS ===
+    // Proper angulation increases effective grip at deep edge angles
+    // Without angulation, deep edges are unstable
+    const angulationGrip = this.angulation * absEdge * 0.15;
+
+    // === SPEED-EDGE COUPLING (simplified for v2) ===
+    // At low speeds, deep edges can wash out (not enough centrifugal force)
+    // At high speeds, carving works great - that's the reward for going fast!
     let speedEdgeGrip = 1.0;
 
-    // How much speed is needed per radian of edge angle
-    // AGGRESSIVE: need 15 m/s to hold 1 rad (~57°) of edge
-    const minSpeedPerRadian = 15;  // Below this ratio, you wash out
-    const maxSpeedPerRadian = 25;  // Above this ratio, you slide out
+    // Angulation lets you hold more edge at lower speeds
+    const angulationBonus = this.angulation * 0.4;
+    const minSpeedPerRadian = 12 * (1 - angulationBonus);  // Below this, wash out risk
 
     // What edge angle is supportable at current speed?
     const supportableEdge = speed2D / minSpeedPerRadian;
-    // What edge angle is required at current speed?
-    const requiredEdge = speed2D / maxSpeedPerRadian;
 
-    // === WASH OUT: Too much edge for speed ===
-    if (absEdge > supportableEdge && speed2D < 20) {
-      const overEdge = absEdge - supportableEdge;
-      // Aggressive penalty curve
-      const washOutPenalty = Math.min(overEdge * 2.0, 0.6);
+    // === WASH OUT: Too much edge for speed (low speed only) ===
+    const effectiveOverEdge = absEdge - supportableEdge;
+    if (effectiveOverEdge > 0 && speed2D < 15) {
+      const angulationProtection = this.angulation * 0.5;
+      const washOutPenalty = Math.min(effectiveOverEdge * 1.5 * (1 - angulationProtection), 0.4);
       speedEdgeGrip -= washOutPenalty;
 
-      // TRIGGER WASH OUT STATE - lower threshold, happens more easily
-      if (overEdge > 0.15 && !this.isWashingOut && !this.isEdgeCaught) {
+      // Only trigger full wash-out at very low speeds with extreme edge
+      const washOutThreshold = 0.25 + this.angulation * 0.2;
+      if (effectiveOverEdge > washOutThreshold && speed2D < 8 && !this.isWashingOut && !this.isEdgeCaught) {
         this.isWashingOut = true;
-        this.washOutIntensity = Math.min(overEdge * 2.5, 1.0);
+        this.washOutIntensity = Math.min(effectiveOverEdge * 2.0 * (1 - angulationProtection), 0.8);
         this.washOutDirection = edgeSign;
       }
     }
 
-    // === SLIDE OUT: Not enough edge for speed ===
-    if (absEdge < requiredEdge && speed2D > 10) {
-      const underEdge = requiredEdge - absEdge;
-      // More aggressive penalty
-      const slideOutPenalty = Math.min(underEdge * 1.5, 0.5);
-      speedEdgeGrip -= slideOutPenalty;
-
-      // TRIGGER SLIDE OUT STATE - lower threshold
-      if (underEdge > 0.15 && speed2D > 12 && !this.isWashingOut && !this.isEdgeCaught) {
-        this.isWashingOut = true;
-        this.washOutIntensity = Math.min(underEdge * 2.0, 0.9);
-        this.washOutDirection = edgeSign || (Math.random() > 0.5 ? 1 : -1);
-      }
+    // High speed carving is REWARDED - more grip from speed + edge combo
+    if (speed2D > 15 && absEdge > 0.4) {
+      const speedCarveBonus = Math.min((speed2D - 15) * 0.005, 0.15);
+      speedEdgeGrip += speedCarveBonus;
     }
 
-    speedEdgeGrip = Math.max(speedEdgeGrip, 0.4); // Floor to prevent complete loss
+    speedEdgeGrip = Math.max(speedEdgeGrip, 0.5); // Higher floor for more forgiving feel
 
     // === WASH OUT CONSEQUENCES ===
     if (this.isWashingOut) {
@@ -1135,14 +1725,27 @@ export class PlayerController {
     }
 
     // Calculate base grip before snow condition
-    let calculatedGrip = (baseGrip + edgeGrip + railGrip) * speedEdgeGrip;
+    // Now includes edge bite and angulation bonuses!
+    let calculatedGrip = (baseGrip + edgeGrip + railGrip + biteGrip + angulationGrip) * speedEdgeGrip;
 
     // Apply snow condition modifier
     // Ice reduces grip, powder increases it
     const snowGripMod = this.currentSnowCondition.gripMultiplier;
     calculatedGrip *= snowGripMod;
 
-    let finalGrip = THREE.MathUtils.clamp(calculatedGrip, 0.3, 0.98);
+    // === FLOW STATE GRIP BONUS ===
+    // When in flow, everything feels more locked in
+    const flowGripBonus = this.flowState * 0.08;
+    calculatedGrip += flowGripBonus;
+
+    let targetGrip = THREE.MathUtils.clamp(calculatedGrip, 0.3, 0.98);
+
+    // === SMOOTH GRIP TRANSITIONS ===
+    // Grip changes smoothly to prevent choppy feel
+    // Faster response when grip is dropping (safety), slower when building
+    const gripChangeRate = targetGrip < this.smoothedGrip ? 8 : 5;
+    this.smoothedGrip = THREE.MathUtils.lerp(this.smoothedGrip, targetGrip, gripChangeRate * dt);
+    let finalGrip = this.smoothedGrip;
 
     // === RISK CALCULATION ===
     // Risk increases when: high speed + deep edge + low grip surface
@@ -1150,18 +1753,21 @@ export class PlayerController {
     const edgeRisk = Math.pow(absEdge / 1.0, 2);         // Deeper edges = more risk
     const gripDeficit = Math.max(0, 0.6 - finalGrip);   // Risk if grip is low
 
-    // Speed-edge mismatch risk (NEW)
+    // Speed-edge mismatch risk
     // Adds risk when edge doesn't match speed
     const speedEdgeMismatchRisk = (1 - speedEdgeGrip) * 0.6;
+
+    // Angulation reduces risk at deep edges
+    const angulationRiskReduction = this.angulation * edgeRisk * 0.5;
 
     // Ice massively increases risk
     const conditionRisk = this.currentSnowCondition.type === 'ice' ?
       this.currentSnowCondition.intensity * 0.4 : 0;
 
-    // Combined risk
+    // Combined risk (angulation helps, flow helps)
     let targetRisk = (speedRisk * 0.3 + edgeRisk * 0.2 + gripDeficit * 0.2 +
-                      speedEdgeMismatchRisk + conditionRisk) *
-      (1 + speedRisk);  // Speed multiplies overall risk
+                      speedEdgeMismatchRisk + conditionRisk - angulationRiskReduction) *
+      (1 + speedRisk) * (1 - this.flowState * 0.2);  // Flow reduces overall risk
 
     // Recovery reduces risk buildup
     if (this.isRecovering) {
@@ -1174,19 +1780,27 @@ export class PlayerController {
 
     // === HIGH RISK EFFECTS ===
     if (this.riskLevel > 0.5) {
-      // Add wobble that increases with risk
+      // Add SMOOTH wobble that increases with risk
+      // Use sine waves instead of random for smoother feel
       const wobbleIntensity = (this.riskLevel - 0.5) * 2;
-      this.wobbleAmount = wobbleIntensity * (Math.random() - 0.5) * 0.15;
+      const time = performance.now() / 1000;
+      const wobbleFreq1 = Math.sin(time * 8.3) * 0.6;
+      const wobbleFreq2 = Math.sin(time * 12.7) * 0.4;
+      const targetWobble = wobbleIntensity * (wobbleFreq1 + wobbleFreq2) * 0.08;
+
+      // Smooth the wobble
+      this.wobbleAmount = THREE.MathUtils.lerp(this.wobbleAmount, targetWobble, 10 * dt);
 
       // Wobble affects heading slightly
-      this.headingVelocity += this.wobbleAmount * speed2D * 0.1;
+      this.headingVelocity += this.wobbleAmount * speed2D * 0.08;
 
-      // At extreme risk, grip fails more
+      // At extreme risk, grip fails more (but smoothly)
       if (this.riskLevel > 0.8) {
-        finalGrip *= 0.8;  // Grip degrades when pushing too hard
+        const gripPenalty = (this.riskLevel - 0.8) * 0.4; // 0 to 0.08
+        finalGrip *= (1 - gripPenalty);
       }
     } else {
-      this.wobbleAmount *= 0.9;  // Decay wobble
+      this.wobbleAmount *= 0.85;  // Decay wobble smoothly
     }
 
     // === RECOVERY STATE ===
@@ -1214,9 +1828,21 @@ export class PlayerController {
       const normalizedG = Math.min(gForce / 100, 1); // Cap the effect
 
       // Carve acceleration - like pumping in the turn
-      const carveAccel = normalizedG * this.carveRailStrength * this.carvePerfection * 2.0;
+      // Enhanced by flow state and proper angulation
+      const flowBonus = 1 + this.flowState * 0.5;  // Up to 50% more acceleration in flow
+      const angulationBonus = 1 + this.angulation * 0.3; // Better form = more efficient
+      const carveAccel = normalizedG * this.carveRailStrength * this.carvePerfection * 2.0 *
+                          flowBonus * angulationBonus;
       this.velocity.x += forward.x * carveAccel * dt;
       this.velocity.z += forward.z * carveAccel * dt;
+    }
+
+    // === BOARD FLEX ENERGY BOOST ===
+    // During sustained carves, flex energy provides subtle forward push
+    if (this.boardFlex > 0.3 && this.flexEnergy > 0.3) {
+      const flexPush = this.flexEnergy * this.boardFlex * 0.5 * dt;
+      this.velocity.x += forward.x * flexPush;
+      this.velocity.z += forward.z * flexPush;
     }
 
     // === RECONSTRUCT VELOCITY ===
@@ -1240,29 +1866,33 @@ export class PlayerController {
     this.velocity.x *= drag;
     this.velocity.z *= drag;
 
-    // === WEIGHT-BASED THRUST/BRAKE ===
+    // === WEIGHT-BASED TUCK ===
+    // Leaning forward into a tuck reduces drag for speed
     if (this.input.lean > 0.1) {
-      // Tuck - reduces drag, compresses for speed
       const tuck = this.input.lean;
       const thrust = tuck * 2.0;
       this.velocity.x += forward.x * thrust * dt;
       this.velocity.z += forward.z * thrust * dt;
     }
+    // === BRAKING (lean back to slow down) ===
+    // Leaning back shifts weight to tail, creating drag and scrubbing speed
+    if (this.input.lean < -0.2 && speed2D > 2) {
+      const brakeIntensity = Math.abs(this.input.lean + 0.2) / 0.8; // 0-1 based on how far back
 
-    if (this.input.lean < -0.1) {
-      // Stand up / brake - scrubbing snow to slow down
-      const brakeStrength = Math.abs(this.input.lean);
-      // Much stronger braking - like scrubbing/skidding
-      const brakeFactor = 1 - brakeStrength * dt * 12;
-      this.velocity.x *= brakeFactor;
-      this.velocity.z *= brakeFactor;
+      // Brake force scales with speed (more effective at higher speeds)
+      const brakePower = brakeIntensity * speed2D * 0.15;
 
-      // Also add extra drag when leaning back hard (sitting back = big speed scrub)
-      if (brakeStrength > 0.5) {
-        const extraDrag = (brakeStrength - 0.5) * dt * 8;
-        this.velocity.x *= (1 - extraDrag);
-        this.velocity.z *= (1 - extraDrag);
+      // Apply deceleration
+      this.velocity.x -= (this.velocity.x / speed2D) * brakePower * dt;
+      this.velocity.z -= (this.velocity.z / speed2D) * brakePower * dt;
+
+      // Braking reduces carve effectiveness (can't carve while braking hard)
+      if (brakeIntensity > 0.5) {
+        this.carveRailStrength *= (1 - brakeIntensity * 0.5 * dt * 10);
       }
+
+      // Compression from braking stance
+      this.targetCompression = Math.max(this.targetCompression, brakeIntensity * 0.4);
     }
 
     // === SPEED LIMITS ===
@@ -1304,32 +1934,27 @@ export class PlayerController {
   }
 
   initiateJump(speed2D, forward) {
-    // === CHARGE-BASED OLLIE ===
-    // Charge level dramatically affects pop power
-    const chargeBonus = this.jumpCharge * 4.0; // 0-4 extra meters of pop
+    // === JUMP SYSTEM ===
+    // Tap = tiny hop, Hold = bigger ollie
 
-    // Base jump power
-    let jumpPower = 5.0 + chargeBonus;
+    // Base tiny hop (tap space)
+    let jumpPower = 2.5;
 
-    // Weight position affects style
+    // Charge bonus (hold space for bigger jump)
+    const chargeBonus = this.jumpCharge * 3.0; // 0-3 extra
+    jumpPower += chargeBonus;
+
+    // Weight position affects style (small bonus)
     if (this.weightForward < -0.2) {
-      // Tail pop - proper ollie (best pop)
-      jumpPower += 1.5 + Math.abs(this.weightForward) * 1.5;
-    } else if (this.weightForward > 0.3) {
-      // Nose pop - nollie (slightly less pop)
-      jumpPower += 0.5;
+      // Tail pop - proper ollie
+      jumpPower += 0.5 + Math.abs(this.weightForward) * 0.5;
     }
 
-    // Speed bonus (going fast = more pop from momentum)
-    jumpPower += Math.min(speed2D * 0.05, 2.0);
+    // Small speed bonus
+    jumpPower += Math.min(speed2D * 0.02, 1.0);
 
-    // Carve energy bonus (pumping through turns builds pop)
-    jumpPower += this.carveEnergy * 2.0;
-
-    // === EXTENSION SNAP ===
-    // The "pop" - sudden extension from compression
-    const extensionSnap = this.compression * 2.0; // More compressed = more snap
-    jumpPower += extensionSnap;
+    // Compression snap (small bonus)
+    jumpPower += this.compression * 0.5;
 
     this.velocity.y = jumpPower;
 
@@ -1435,6 +2060,159 @@ export class PlayerController {
       this.velocity.x += right.x * airSteer;
       this.velocity.z += right.z * airSteer;
     }
+  }
+
+  // === GRINDING SYSTEM ===
+  startGrind(railInfo) {
+    this.isGrinding = true;
+    this.grindRail = railInfo.rail;
+    this.grindProgress = railInfo.progress;
+    this.grindBalance = 0;
+    this.grindTime = 0;
+    this.isGrounded = false; // Not on ground, on rail
+
+    // Lock Y position to rail
+    const railY = railInfo.railY;
+
+    // Align heading to rail direction (with some of player's original direction)
+    const railAngle = railInfo.rail.angle;
+    const headingDiff = this.normalizeAngle(railAngle - this.heading);
+
+    // If approaching from opposite direction, flip rail angle
+    if (Math.abs(headingDiff) > Math.PI / 2) {
+      this.heading = this.normalizeAngle(railAngle + Math.PI);
+    } else {
+      this.heading = THREE.MathUtils.lerp(this.heading, railAngle, 0.5);
+    }
+
+    // Convert velocity to rail direction
+    const speed = Math.sqrt(this.velocity.x ** 2 + this.velocity.z ** 2);
+    const forward = new THREE.Vector3(
+      -Math.sin(this.heading),
+      0,
+      Math.cos(this.heading)
+    );
+    this.velocity.set(forward.x * speed, 0, forward.z * speed);
+
+    // Reset air rotation
+    this.pitch = 0;
+    this.roll = 0;
+    this.pitchVelocity = 0;
+    this.rollVelocity = 0;
+
+    console.log('Started grinding!');
+  }
+
+  updateGrindPhysics(dt, pos) {
+    if (!this.grindRail) {
+      this.endGrind();
+      return;
+    }
+
+    this.grindTime += dt;
+    const rail = this.grindRail;
+
+    // === BALANCE SYSTEM ===
+    // Player must balance using steer input
+    // Balance drifts based on speed and slight randomness
+    const balanceDrift = (Math.random() - 0.5) * 0.5 * dt;
+    const speedWobble = (this.currentSpeed / 30) * (Math.random() - 0.5) * dt;
+    this.grindBalance += balanceDrift + speedWobble;
+
+    // Steer input corrects balance
+    this.grindBalance -= this.input.steer * 3 * dt;
+
+    // Balance affects edge angle visually
+    this.edgeAngle = this.grindBalance * 0.8;
+
+    // === CHECK BALANCE FAIL ===
+    if (Math.abs(this.grindBalance) > 1.0) {
+      // Fell off rail!
+      console.log('Lost balance on rail!');
+      this.endGrind();
+
+      // Add sideways velocity from falling off
+      const right = new THREE.Vector3(
+        Math.cos(this.heading),
+        0,
+        Math.sin(this.heading)
+      );
+      const fallDir = Math.sign(this.grindBalance);
+      this.velocity.x += right.x * fallDir * 3;
+      this.velocity.z += right.z * fallDir * 3;
+      this.velocity.y = -2; // Start falling
+      return;
+    }
+
+    // === RAIL MOVEMENT ===
+    // Slide along rail with reduced friction
+    const grindFriction = 0.995; // Very low friction on rail
+    const speed2D = Math.sqrt(this.velocity.x ** 2 + this.velocity.z ** 2);
+
+    // Keep velocity aligned to rail
+    const forward = new THREE.Vector3(
+      -Math.sin(this.heading),
+      0,
+      Math.cos(this.heading)
+    );
+
+    this.velocity.x = forward.x * speed2D * grindFriction;
+    this.velocity.z = forward.z * speed2D * grindFriction;
+
+    // Gravity component along rail (if rail is angled down)
+    const slopeBoost = 2.0; // Slight acceleration on rails
+    this.velocity.x += forward.x * slopeBoost * dt;
+    this.velocity.z += forward.z * slopeBoost * dt;
+
+    // Calculate new position along rail
+    const railStartZ = rail.z - rail.length / 2;
+    const railEndZ = rail.z + rail.length / 2;
+    const railX = rail.x + Math.sin(rail.angle) * (pos.z - rail.z);
+    const railY = this.terrain.calculateHeight(rail.x, rail.z) + rail.height;
+
+    // Update position - lock to rail
+    const newX = railX + this.grindBalance * 0.3; // Slight X wobble from balance
+    const newZ = pos.z + this.velocity.z * dt;
+
+    // Check if still on rail
+    if (newZ < railStartZ || newZ > railEndZ) {
+      // Reached end of rail
+      console.log('Grind complete! Style points!');
+      this.endGrind();
+
+      // Pop off the end
+      this.velocity.y = 3;
+      return;
+    }
+
+    // Update progress
+    this.grindProgress = (newZ - railStartZ) / rail.length;
+
+    // Set position
+    this.body.setNextKinematicTranslation({
+      x: newX,
+      y: railY + 0.15, // Slight offset above rail
+      z: newZ
+    });
+
+    // Update speed
+    this.currentSpeed = Math.sqrt(
+      this.velocity.x * this.velocity.x +
+      this.velocity.z * this.velocity.z
+    );
+
+    // Update visuals
+    this.updateMesh();
+
+    // Grind spray/sparks (reuse snow spray with different color intent)
+    this.updateSprayParticles(dt, this.currentSpeed * 0.5, true, this.grindBalance);
+  }
+
+  endGrind() {
+    this.isGrinding = false;
+    this.grindRail = null;
+    this.grindProgress = 0;
+    this.grindBalance = 0;
   }
 
   checkGround(pos) {
@@ -1790,6 +2568,14 @@ export class PlayerController {
   applyRiderAnimation(dt) {
     if (!this.riderGroup || !this.animState) return;
 
+    // Handle GLB model animation separately
+    if (this.modelVersion === 3 && this.playerModelGLB) {
+      this.animState.carveRailStrength = this.carveRailStrength;
+      this.playerModelGLB.applyPose(this.animState, this.edgeAngle, this.isGrounded);
+      this.playerModelGLB.update(dt);
+      return;
+    }
+
     const anim = this.animState;
     const absEdge = Math.abs(this.edgeAngle);
     const edgeSign = Math.sign(this.edgeAngle);
@@ -1825,13 +2611,22 @@ export class PlayerController {
     const avgKnee = (frontKnee + backKnee) / 2;
     const hipY = this.bootHeight + this.shinLength + this.thighLength - avgKnee * 0.18;
 
-    this.hipsMesh.position.y = hipY;
-    this.hipsMesh.position.x = anim.hipShift;
-    this.hipsMesh.rotation.y = anim.counterRotation * 0.3;
-
     // Forward/back hip shift based on weight distribution
     const hipZ = (frontKnee - backKnee) * 0.05;
-    this.hipsMesh.position.z = hipZ;
+
+    if (this.modelVersion === 2 && this.pelvisGroup) {
+      // V2: Animate pelvis group
+      this.pelvisGroup.position.y = hipY;
+      this.pelvisGroup.position.x = anim.hipShift;
+      this.pelvisGroup.position.z = hipZ;
+      this.pelvisGroup.rotation.y = anim.counterRotation * 0.3;
+    } else {
+      // V1: Animate hips mesh directly
+      this.hipsMesh.position.y = hipY;
+      this.hipsMesh.position.x = anim.hipShift;
+      this.hipsMesh.rotation.y = anim.counterRotation * 0.3;
+      this.hipsMesh.position.z = hipZ;
+    }
 
     // === LOWER BODY LATERAL SHIFT ===
     this.lowerBodyGroup.position.x = anim.hipShift * 0.5;
@@ -1841,21 +2636,28 @@ export class PlayerController {
     this.upperBodyGroup.position.y = upperBodyY;
     this.upperBodyGroup.position.x = anim.hipShift * 0.3;
 
-    // === TORSO - ANGULATION (the key carve look!) ===
-    this.torsoMesh.rotation.z = anim.angulation;
-    this.torsoMesh.rotation.y = anim.counterRotation;
-
     // Forward lean - more when compressed
     const forwardLean = avgKnee * 0.15 + this.currentSpeed * 0.003;
-    this.torsoMesh.rotation.x = forwardLean;
 
-    // Update torso position to follow hip height
-    this.torsoMesh.position.y = 0.68 + upperBodyY * 0.3;
+    // === TORSO - ANGULATION (the key carve look!) ===
+    if (this.modelVersion === 2 && this.torsoGroup) {
+      // V2: Animate torso group for smoother results
+      this.torsoGroup.rotation.z = anim.angulation;
+      this.torsoGroup.rotation.y = anim.counterRotation;
+      this.torsoGroup.rotation.x = forwardLean;
+      this.torsoGroup.position.y = upperBodyY * 0.3;
+    } else {
+      // V1: Animate torso mesh directly
+      this.torsoMesh.rotation.z = anim.angulation;
+      this.torsoMesh.rotation.y = anim.counterRotation;
+      this.torsoMesh.rotation.x = forwardLean;
+      this.torsoMesh.position.y = 0.68 + upperBodyY * 0.3;
 
-    // Shoulders - more counter-rotation than hips
-    this.shouldersMesh.rotation.y = anim.counterRotation * 1.5;
-    this.shouldersMesh.rotation.z = anim.angulation * 0.8;
-    this.shouldersMesh.position.y = 0.86 + upperBodyY * 0.4;
+      // Shoulders - more counter-rotation than hips
+      this.shouldersMesh.rotation.y = anim.counterRotation * 1.5;
+      this.shouldersMesh.rotation.z = anim.angulation * 0.8;
+      this.shouldersMesh.position.y = 0.86 + upperBodyY * 0.4;
+    }
 
     // === ARM ANIMATION (athletic carving stance) ===
     // Arms held FORWARD in ready position, not hanging down
@@ -1934,15 +2736,24 @@ export class PlayerController {
 
     // === HEAD / NECK ===
     const headY = 1.04 + upperBodyY * 0.5;
-    this.headMesh.position.y = headY;
-    this.headMesh.rotation.y = anim.headLook;
-    this.headMesh.rotation.z = anim.angulation * 0.25;
 
-    this.neckMesh.position.y = headY - 0.1;
-    this.neckMesh.rotation.y = anim.headLook * 0.5;
+    if (this.modelVersion === 2 && this.headGroup) {
+      // V2: Animate the head group
+      this.headGroup.position.y = upperBodyY * 0.3;
+      this.headGroup.rotation.y = anim.headLook;
+      this.headGroup.rotation.z = anim.angulation * 0.25;
+    } else {
+      // V1: Animate individual meshes
+      this.headMesh.position.y = headY;
+      this.headMesh.rotation.y = anim.headLook;
+      this.headMesh.rotation.z = anim.angulation * 0.25;
 
-    this.helmetMesh.position.y = headY;
-    this.goggleMesh.position.y = headY + 0.01;
+      this.neckMesh.position.y = headY - 0.1;
+      this.neckMesh.rotation.y = anim.headLook * 0.5;
+
+      this.helmetMesh.position.y = headY;
+      this.goggleMesh.position.y = headY + 0.01;
+    }
 
     // === AIR ANIMATIONS ===
     if (!this.isGrounded) {
@@ -2077,6 +2888,35 @@ export class PlayerController {
     this.carveEntryEdge = 0;
     this.turnShapeQuality = 1;
     this.lastEdgeAngleDelta = 0;
+
+    // Reset new carve physics systems
+    this.angulation = 0;
+    this.targetAngulation = 0;
+    this.angulationCapacity = 1.0;
+    this.boardFlex = 0;
+    this.flexEnergy = 0;
+    this.flowState = 0;
+    this.flowMomentum = 0;
+    this.arcHeadingChange = 0;
+    this.arcStartHeading = 0;
+    this.arcType = 'none';
+    this.edgeBite = 0;
+
+    // Reset smoothing systems
+    this.edgeVelocity = 0;
+    this.turnInertia = 0;
+    this.smoothedGrip = 0.7;
+    this.lastAbsEdge = 0;
+    this.smoothedRailStrength = 0;
+    this.turnRhythm = 0;
+    this.rhythmPhase = 0;
+
+    // Reset grinding state
+    this.isGrinding = false;
+    this.grindRail = null;
+    this.grindProgress = 0;
+    this.grindBalance = 0;
+    this.grindTime = 0;
 
     // Reset animation state
     if (this.animState) {

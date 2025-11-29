@@ -335,10 +335,10 @@ export class AudioSystem {
       this.playTransitionPop(absEdge);
     }
 
-    // === TERRAIN SYNC ===
-    if (terrainSync > 0.7) {
-      this.playTerrainSync();
-    }
+    // === TERRAIN SYNC === (disabled - annoying ding)
+    // if (terrainSync > 0.7) {
+    //   this.playTerrainSync();
+    // }
   }
 
   /**

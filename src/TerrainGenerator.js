@@ -33,6 +33,11 @@ export class TerrainGenerator {
     // Creates challenge zones that affect grip and speed
     this.snowZones = [];
     this.generateSnowZones();
+
+    // === GRIND RAILS ===
+    this.rails = [];
+    this.railMeshes = [];
+    this.generateRails();
   }
 
   /**
@@ -41,9 +46,22 @@ export class TerrainGenerator {
   generateFeatures() {
     this.features = [];
 
+    // Add guaranteed kicker near the start so players can find it easily
+    const startZ = -this.length / 2 + 150;
+    const startTrailX = this.getTrailCenterX(startZ);
+    this.features.push({
+      type: 'kicker',
+      x: startTrailX,
+      z: startZ,
+      width: 12,
+      length: 16,
+      height: 4,
+      angle: 0.45
+    });
+
     // Feature placement along the trail
     const featureSpacing = 60; // Average spacing between features
-    let z = -this.length / 2 + 100; // Start after initial section
+    let z = -this.length / 2 + 200; // Start after the guaranteed kicker
 
     while (z < this.length / 2 - 100) {
       const trailX = this.getTrailCenterX(z);
@@ -90,7 +108,7 @@ export class TerrainGenerator {
           length: 20 + Math.random() * 10,
           depth: 1 + Math.random() * 1.5
         };
-      } else {
+      } else if (rand < 0.85) {
         // TERRAIN WAVE - Series of gentle undulations
         feature = {
           type: 'wave',
@@ -100,6 +118,17 @@ export class TerrainGenerator {
           length: 40 + Math.random() * 20,
           amplitude: 0.8 + Math.random() * 0.6,
           frequency: 3 + Math.floor(Math.random() * 2) // Number of waves
+        };
+      } else {
+        // KICKER - Jump ramp for big air! (~15% of features)
+        feature = {
+          type: 'kicker',
+          x: trailX + (Math.random() - 0.5) * 6, // Slight offset from center
+          width: 10 + Math.random() * 4,    // 10-14m wide
+          z: z,
+          length: 14 + Math.random() * 6,   // 14-20m long ramp
+          height: 3 + Math.random() * 2,    // 3-5m tall
+          angle: 0.4 + Math.random() * 0.15 // Takeoff angle ~23-32 degrees
         };
       }
 
@@ -189,6 +218,108 @@ export class TerrainGenerator {
       case 'slush': return 1.3;    // Medium drag
       default: return 1.0;
     }
+  }
+
+  /**
+   * Generate grind rails along the course
+   * Rails placed after kickers for style combos
+   */
+  generateRails() {
+    this.rails = [];
+
+    // Place rails after some kickers for jump-to-grind combos
+    for (const feature of this.features) {
+      if (feature.type === 'kicker') {
+        // 60% chance to place a rail after a kicker
+        if (Math.random() < 0.6) {
+          const railZ = feature.z + feature.length + 8; // Landing zone
+          const trailX = this.getTrailCenterX(railZ);
+
+          // Rail parameters
+          const railLength = 8 + Math.random() * 6; // 8-14m long
+          const railHeight = 0.8 + Math.random() * 0.4; // 0.8-1.2m high
+          const railAngle = (Math.random() - 0.5) * 0.3; // Slight angle variation
+
+          // Offset from center (sometimes left, sometimes right, sometimes center)
+          const offsetChoice = Math.random();
+          let xOffset = 0;
+          if (offsetChoice < 0.33) {
+            xOffset = -6 - Math.random() * 4; // Left
+          } else if (offsetChoice < 0.66) {
+            xOffset = 6 + Math.random() * 4; // Right
+          }
+
+          this.rails.push({
+            x: trailX + xOffset,
+            z: railZ,
+            length: railLength,
+            height: railHeight,
+            angle: railAngle, // Direction rail points (down the slope)
+            width: 0.15, // Rail width (hitbox)
+            type: 'flat' // flat, down, kinked
+          });
+        }
+      }
+    }
+
+    // Add some standalone rails along the trail
+    let z = -this.length / 2 + 250;
+    while (z < this.length / 2 - 150) {
+      if (Math.random() < 0.3) { // 30% chance at each position
+        const trailX = this.getTrailCenterX(z);
+        const side = Math.random() > 0.5 ? 1 : -1;
+        const railLength = 10 + Math.random() * 8;
+
+        this.rails.push({
+          x: trailX + side * (8 + Math.random() * 6),
+          z: z,
+          length: railLength,
+          height: 0.6 + Math.random() * 0.6,
+          angle: (Math.random() - 0.5) * 0.2, // Slight angle
+          width: 0.15,
+          type: Math.random() < 0.2 ? 'down' : 'flat'
+        });
+      }
+      z += 80 + Math.random() * 60;
+    }
+  }
+
+  /**
+   * Check if position is on a rail
+   * Returns rail info or null
+   */
+  getRailAt(x, y, z) {
+    for (const rail of this.rails) {
+      // Get rail endpoints
+      const railStartZ = rail.z - rail.length / 2;
+      const railEndZ = rail.z + rail.length / 2;
+
+      // Check Z bounds (along rail)
+      if (z < railStartZ || z > railEndZ) continue;
+
+      // Calculate rail position at this Z
+      const t = (z - railStartZ) / rail.length;
+      const railX = rail.x + Math.sin(rail.angle) * (z - rail.z);
+      const railY = this.calculateHeight(rail.x, rail.z) + rail.height;
+
+      // Height check - must be near the rail (above it or landing on it)
+      const heightDiff = y - railY;
+      if (heightDiff < -0.3 || heightDiff > 1.5) continue;
+
+      // X distance check (width of rail hitbox)
+      const xDist = Math.abs(x - railX);
+      if (xDist > 0.8) continue; // Generous hitbox for gameplay
+
+      return {
+        rail: rail,
+        railX: railX,
+        railY: railY,
+        railZ: z,
+        progress: t,
+        distance: xDist
+      };
+    }
+    return null;
   }
 
   /**
@@ -367,6 +498,9 @@ export class TerrainGenerator {
     // Add trail markers
     this.addTrailMarkers();
 
+    // Add grind rails
+    this.addRailMeshes();
+
     this.createPhysicsCollider(geometry);
 
     // Spawn on trail
@@ -436,8 +570,8 @@ export class TerrainGenerator {
       // Groomed trail - completely flat cross-section for smooth carving
       // No corduroy physics bumps, no banking - just pure smooth snow
 
-      // Terrain features disabled for smooth groomed trail
-      // trailHeight += this.getFeatureHeight(x, z, trailBlend);
+      // Enable kickers for jumps on the trail
+      trailHeight += this.getFeatureHeight(x, z, trailBlend);
     }
 
     // === BLEND TRAIL AND OFF-TRAIL ===
@@ -518,6 +652,32 @@ export class TerrainGenerator {
             const falloffX = Math.cos(distX * Math.PI / 2);
             const waveHeight = Math.sin(wavePhase) * feature.amplitude;
             featureHeight += waveHeight * falloffX * trailBlend;
+          }
+          break;
+        }
+
+        case 'kicker': {
+          // Jump ramp - rises from ground level to peak, then drops off
+          const distX = Math.abs(dx) / (feature.width / 2);
+
+          if (distX < 1) {
+            // Ramp profile: smooth rise to takeoff lip
+            // dz < 0 means approaching (uphill), dz > 0 means past the lip
+            const rampProgress = (dz + feature.length) / feature.length; // 0 at start, 1 at lip
+
+            if (rampProgress >= 0 && rampProgress <= 1) {
+              // Smooth ramp up using ease-in curve
+              const rampHeight = feature.height * Math.pow(rampProgress, 1.5);
+              // Smooth X falloff for width
+              const falloffX = Math.cos(distX * Math.PI / 2);
+              featureHeight += rampHeight * falloffX * trailBlend;
+            } else if (rampProgress > 1 && rampProgress < 1.3) {
+              // Lip - maintain height briefly then drop
+              const lipProgress = (rampProgress - 1) / 0.3;
+              const lipHeight = feature.height * (1 - lipProgress * lipProgress);
+              const falloffX = Math.cos(distX * Math.PI / 2);
+              featureHeight += lipHeight * falloffX * trailBlend;
+            }
           }
           break;
         }
@@ -785,6 +945,74 @@ export class TerrainGenerator {
     }
 
     this.sceneManager.add(markerGroup);
+  }
+
+  addRailMeshes() {
+    // Create visual meshes for grind rails
+    const railGroup = new THREE.Group();
+
+    // Rail material - metallic look
+    const railMat = new THREE.MeshStandardMaterial({
+      color: 0x888899,
+      metalness: 0.8,
+      roughness: 0.3
+    });
+
+    // Support post material
+    const postMat = new THREE.MeshStandardMaterial({
+      color: 0x444444,
+      metalness: 0.5,
+      roughness: 0.6
+    });
+
+    for (const rail of this.rails) {
+      // Main rail tube
+      const railGeo = new THREE.CylinderGeometry(0.08, 0.08, rail.length, 8);
+      railGeo.rotateX(Math.PI / 2); // Align along Z axis
+
+      const railMesh = new THREE.Mesh(railGeo, railMat);
+      const railY = this.calculateHeight(rail.x, rail.z) + rail.height;
+      railMesh.position.set(rail.x, railY, rail.z);
+      railMesh.rotation.y = rail.angle;
+      railMesh.castShadow = true;
+      railMesh.receiveShadow = true;
+      railGroup.add(railMesh);
+
+      // Store mesh reference for potential effects
+      this.railMeshes.push(railMesh);
+
+      // Support posts at ends
+      const postGeo = new THREE.CylinderGeometry(0.05, 0.06, rail.height, 6);
+
+      // Start post
+      const startZ = rail.z - rail.length / 2;
+      const startX = rail.x + Math.sin(rail.angle) * (-rail.length / 2);
+      const startY = this.calculateHeight(startX, startZ);
+      const startPost = new THREE.Mesh(postGeo, postMat);
+      startPost.position.set(startX, startY + rail.height / 2, startZ);
+      startPost.castShadow = true;
+      railGroup.add(startPost);
+
+      // End post
+      const endZ = rail.z + rail.length / 2;
+      const endX = rail.x + Math.sin(rail.angle) * (rail.length / 2);
+      const endY = this.calculateHeight(endX, endZ);
+      const endPost = new THREE.Mesh(postGeo, postMat);
+      endPost.position.set(endX, endY + rail.height / 2, endZ);
+      endPost.castShadow = true;
+      railGroup.add(endPost);
+
+      // Middle support for longer rails
+      if (rail.length > 10) {
+        const midY = this.calculateHeight(rail.x, rail.z);
+        const midPost = new THREE.Mesh(postGeo, postMat);
+        midPost.position.set(rail.x, midY + rail.height / 2, rail.z);
+        midPost.castShadow = true;
+        railGroup.add(midPost);
+      }
+    }
+
+    this.sceneManager.add(railGroup);
   }
 
   createPhysicsCollider(geometry) {

@@ -10,11 +10,23 @@ export class InputHandler {
       toggleColliders: null,
       toggleFreeCamera: null,
       toggleZenMode: null,
-      startChallenge: null
+      startChallenge: null,
+      cameraOrbit: null,
+      cameraPitch: null,
+      cameraReset: null,
+      toggleCameraVersion: null,
+      cycleCameraMode: null,
+      toggleModelVersion: null
     };
+
+    // Smoothed input state
+    this.smoothSteer = 0;
+    this.smoothLean = 0;
 
     // Gamepad state
     this.gamepadIndex = null;
+    this.gamepadJumpPressed = false;
+    this.gamepadButtonStates = {}; // Track button press states for debouncing
 
     // Touch state
     this.touchActive = false;
@@ -50,12 +62,15 @@ export class InputHandler {
     // Gamepad events
     window.addEventListener('gamepadconnected', (e) => {
       this.gamepadIndex = e.gamepad.index;
-      console.log('Gamepad connected:', e.gamepad.id);
+      console.log('🎮 Gamepad connected:', e.gamepad.id);
+      console.log('   L-stick: Steer/Lean | R-stick: Camera (R3 to reset)');
+      console.log('   A: Jump | B: Restart | Y: Zen | Start: Gates');
     });
 
     window.addEventListener('gamepaddisconnected', () => {
       this.gamepadIndex = null;
-      console.log('Gamepad disconnected');
+      this.gamepadButtonStates = {};
+      console.log('🎮 Gamepad disconnected');
     });
 
     // Touch events
@@ -217,28 +232,58 @@ export class InputHandler {
       case 'KeyG':
         if (this.callbacks.startChallenge) this.callbacks.startChallenge();
         break;
+      case 'KeyV':
+        if (this.callbacks.toggleCameraVersion) this.callbacks.toggleCameraVersion();
+        break;
+      case 'KeyC':
+        if (this.callbacks.cycleCameraMode) this.callbacks.cycleCameraMode();
+        break;
+      case 'KeyM':
+        if (this.callbacks.toggleModelVersion) this.callbacks.toggleModelVersion();
+        break;
     }
   }
 
   onKeyUp(e) {
     this.keys[e.code] = false;
+
+    // Handle jump release (triggers the actual jump)
+    if (e.code === 'Space') {
+      if (this.callbacks.jump) this.callbacks.jump(false);
+    }
   }
 
   update() {
-    // Keyboard input
-    let steer = 0;
-    let lean = 0;
+    // === SIMPLE CONTROL SCHEME (v2) ===
+    // WASD or Arrow keys for steering and lean
+    // A/D or Left/Right = Edge angle (heel/toe) - controls turn direction
+    // W/S or Up/Down = Weight forward/back - affects turn tightness and ollie
 
-    if (this.keys['KeyA'] || this.keys['ArrowLeft']) steer -= 1;
-    if (this.keys['KeyD'] || this.keys['ArrowRight']) steer += 1;
-    if (this.keys['KeyW'] || this.keys['ArrowUp']) lean += 1;
-    if (this.keys['KeyS'] || this.keys['ArrowDown']) lean -= 1;
+    // Steer target (edge angle)
+    let steerTarget = 0;
+    if (this.keys['KeyA'] || this.keys['ArrowLeft']) steerTarget -= 1;   // Heelside turn
+    if (this.keys['KeyD'] || this.keys['ArrowRight']) steerTarget += 1;  // Toeside turn
+
+    // Lean target (weight distribution)
+    let leanTarget = 0;
+    if (this.keys['KeyW'] || this.keys['ArrowUp']) leanTarget += 1;      // Weight forward
+    if (this.keys['KeyS'] || this.keys['ArrowDown']) leanTarget -= 1;    // Weight back
+
+    // Smooth the inputs (prevents instant max edge - feels more physical)
+    const steerSmoothRate = 0.22;  // Responsive but not instant
+    const leanSmoothRate = 0.18;
+
+    this.smoothSteer += (steerTarget - this.smoothSteer) * steerSmoothRate;
+    this.smoothLean += (leanTarget - this.smoothLean) * leanSmoothRate;
+
+    let steer = this.smoothSteer;
+    let lean = this.smoothLean;
 
     // Gamepad input (overrides keyboard if connected)
     if (this.gamepadIndex !== null) {
       const gamepad = navigator.getGamepads()[this.gamepadIndex];
       if (gamepad) {
-        // Left stick for steering
+        // Left stick for steering/lean
         const deadzone = 0.15;
         const stickX = gamepad.axes[0];
         const stickY = gamepad.axes[1];
@@ -247,17 +292,76 @@ export class InputHandler {
           steer = stickX;
         }
         if (Math.abs(stickY) > deadzone) {
-          lean = -stickY; // Invert Y
+          lean = -stickY; // Invert Y (push forward = lean forward)
         }
 
-        // A button for jump
-        if (gamepad.buttons[0].pressed) {
+        // A button (Xbox) / X button (PlayStation) for jump - with proper release detection
+        const jumpButton = gamepad.buttons[0];
+        if (jumpButton.pressed && !this.gamepadJumpPressed) {
+          this.gamepadJumpPressed = true;
           if (this.callbacks.jump) this.callbacks.jump(true);
+        } else if (!jumpButton.pressed && this.gamepadJumpPressed) {
+          this.gamepadJumpPressed = false;
+          if (this.callbacks.jump) this.callbacks.jump(false);
         }
 
-        // Start button for restart
-        if (gamepad.buttons[9].pressed) {
+        // Helper for debounced button press detection
+        const isButtonJustPressed = (index) => {
+          const wasPressed = this.gamepadButtonStates[index] || false;
+          const isPressed = gamepad.buttons[index] && gamepad.buttons[index].pressed;
+          this.gamepadButtonStates[index] = isPressed;
+          return isPressed && !wasPressed;
+        };
+
+        // B button (Xbox) / Circle (PlayStation) for restart
+        if (isButtonJustPressed(1)) {
           if (this.callbacks.restart) this.callbacks.restart();
+        }
+
+        // Y button (Xbox) / Triangle (PlayStation) for zen mode
+        if (isButtonJustPressed(3)) {
+          if (this.callbacks.toggleZenMode) this.callbacks.toggleZenMode();
+        }
+
+        // Start button / Options for gate challenge
+        if (isButtonJustPressed(9)) {
+          if (this.callbacks.startChallenge) this.callbacks.startChallenge();
+        }
+
+        // Select/Back button for restart (alternative)
+        if (isButtonJustPressed(8)) {
+          if (this.callbacks.restart) this.callbacks.restart();
+        }
+
+        // Right stick for camera control (axes 2 and 3)
+        const rightStickX = gamepad.axes[2] || 0;
+        const rightStickY = gamepad.axes[3] || 0;
+
+        if (Math.abs(rightStickX) > deadzone) {
+          if (this.callbacks.cameraOrbit) this.callbacks.cameraOrbit(rightStickX);
+        } else {
+          if (this.callbacks.cameraOrbit) this.callbacks.cameraOrbit(0);
+        }
+
+        if (Math.abs(rightStickY) > deadzone) {
+          if (this.callbacks.cameraPitch) this.callbacks.cameraPitch(rightStickY);
+        } else {
+          if (this.callbacks.cameraPitch) this.callbacks.cameraPitch(0);
+        }
+
+        // Right stick click (R3) to reset camera
+        if (isButtonJustPressed(11)) {
+          if (this.callbacks.cameraReset) this.callbacks.cameraReset();
+        }
+
+        // Left bumper (LB) to toggle camera version
+        if (isButtonJustPressed(4)) {
+          if (this.callbacks.toggleCameraVersion) this.callbacks.toggleCameraVersion();
+        }
+
+        // Right bumper (RB) to cycle camera mode
+        if (isButtonJustPressed(5)) {
+          if (this.callbacks.cycleCameraMode) this.callbacks.cycleCameraMode();
         }
       }
     }

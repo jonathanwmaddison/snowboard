@@ -4,7 +4,7 @@
   "description": "3D Snowboarding Physics Prototype",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --port 3008",
     "build": "vite build",
     "preview": "vite preview"
   },
