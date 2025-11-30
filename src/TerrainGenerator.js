@@ -737,33 +737,37 @@ export class TerrainGenerator {
       // === TERRAIN SYNC SCORING ===
       // Different features have different "sync points"
       switch (nearestFeature.type) {
-        case 'roller':
+        case 'roller': {
           // Peak of roller is ideal transition point
           // Sync is highest at peak (phase ~0.5)
           const peakDist = Math.abs(state.featurePhase - 0.5);
           state.terrainSync = Math.max(0, 1 - peakDist * 4);
           break;
+        }
 
-        case 'bank':
+        case 'bank': {
           // Entry to bank (phase 0.2-0.4) is ideal for committing to edge
           if (state.featurePhase > 0.2 && state.featurePhase < 0.5) {
             state.terrainSync = 1 - Math.abs(state.featurePhase - 0.35) * 5;
           }
           break;
+        }
 
-        case 'compression':
+        case 'compression': {
           // Bottom of compression (phase ~0.5) rewards deep edge
           const compDist = Math.abs(state.featurePhase - 0.5);
           state.terrainSync = Math.max(0, 1 - compDist * 3) * 0.8;
           break;
+        }
 
-        case 'wave':
+        case 'wave': {
           // Multiple sync points on wave peaks
           const waveFreq = nearestFeature.frequency || 3;
           const wavePhase = state.featurePhase * waveFreq;
           const wavePeak = Math.abs(Math.sin(wavePhase * Math.PI));
           state.terrainSync = wavePeak * 0.7;
           break;
+        }
       }
 
       // Speed bonus - faster riding through features is more rewarding

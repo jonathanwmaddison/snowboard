@@ -20,6 +20,243 @@ The physics engine is split into modular files for maintainability:
 | `PlayerAnimation.js` | ~700 | Animation state, visual mesh, particles, sport visuals |
 | `AvalancheSystem.js` | ~450 | Avalanche hazards, trigger zones, player collision, debris/dust particles |
 
+### Architecture Layer (4 files)
+
+New modular architecture for testability and AI maintainability:
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `types.js` | ~200 | JSDoc type definitions, factory functions, validators |
+| `PlayerState.js` | ~700 | Organized state management, sync utilities |
+| `CarvePhysicsPure.js` | ~500 | Pure functional physics (no `this` binding) |
+| `physics-utils.js` | ~400 | Pure calculation utilities for physics |
+
+### Types (`src/types.js`)
+
+Comprehensive JSDoc type definitions providing type safety without TypeScript.
+
+**Factory Functions**
+```javascript
+createInputState()      // { steer, lean, jump, switchStance, shift }
+createCoreState()       // { position, velocity, heading, speed, isMoving }
+createTerrainContact()  // { isGrounded, groundHeight, groundNormal, slopeAngle }
+createSnowCondition()   // { type, intensity, gripModifier, dragModifier }
+createEdgeState()       // { edgeAngle, targetEdgeAngle, edgeVelocity, previousEdgeSign }
+createCarveState()      // { carveRailStrength, carveHoldTime, peakEdgeAngle, ... }
+createAirState()        // { airTime, spinVelocity, flipVelocity, pitch, roll }
+```
+
+**Validators**
+```javascript
+validateEdgeAngle(angle, maxEdge)  // Clamps to valid range
+validateSpeed(speed)               // Ensures non-negative
+validateFlowLevel(level)           // Clamps 0-1
+```
+
+**Usage**
+```javascript
+import { createEdgeState, validateEdgeAngle } from './types.js';
+
+const edge = createEdgeState();
+edge.edgeAngle = validateEdgeAngle(steerInput * 1.5);
+```
+
+### PlayerState (`src/PlayerState.js`)
+
+Organizes PlayerController's 140+ flat properties into logical groups.
+
+**State Structure**
+```javascript
+{
+  input: { steer, lean, jump, switchStance, shift },
+  core: { position, velocity, heading, speed, isMoving },
+  terrain: { isGrounded, groundHeight, groundNormal, slopeAngle },
+  snow: { type, intensity, gripModifier, dragModifier },
+  carve: {
+    edge: { edgeAngle, targetEdgeAngle, edgeVelocity, previousEdgeSign },
+    rail: { carveRailStrength, carveHoldTime },
+    performance: { peakEdgeAngle, carvePerfection, flowMomentum },
+    angulation: { angulationCapacity, angulationNeeded, angulationQuality },
+    flex: { boardFlex, flexEnergy },
+    chain: { carveChainCount, lastTransitionTime },
+    arc: { currentArcAngle, arcStartHeading },
+    bite: { edgeBiteLevel }
+  },
+  air: { airTime, spinVelocity, flipVelocity, pitch, roll, jumpChargeTime },
+  switch: { isSwitch, switchPenalty },
+  weight: { pressureDistribution, weightShift },
+  brake: { isBraking, brakeIntensity },
+  board: { sidecutRadius, boardLength, stanceWidth }
+}
+```
+
+**Sync Utilities**
+```javascript
+// Convert organized state to flat PlayerController properties
+syncStateToPlayer(state, player)
+
+// Convert flat PlayerController properties to organized state
+syncPlayerToState(player, state)
+
+// Create fresh state object
+const state = createPlayerState()
+```
+
+### CarvePhysicsPure (`src/CarvePhysicsPure.js`)
+
+Pure functional physics - all functions take explicit state and return new values.
+
+**Key Principle**: No `this` binding, no side effects, fully testable.
+
+**Edge Angle Functions**
+```javascript
+// Calculate target edge from input
+calculateTargetEdge(steer, railStrength, lean, maxEdge)
+// Returns: number (target edge angle in radians)
+
+// Update edge angle with spring-damper physics
+updateEdgeAngle(edgeState, railStrength, dt, maxEdge)
+// Returns: { edgeAngle, edgeVelocity }
+```
+
+**Carve Rail System**
+```javascript
+// Build or decay carve rail strength
+updateCarveRail(edgeAngle, currentStrength, dt, threshold)
+// Returns: { carveRailStrength, carveHoldTime }
+
+// Calculate total grip from all factors
+calculateGrip(edgeAngle, railStrength, angulationQuality, flowState, edgeBiteLevel, snowCondition)
+// Returns: number (0-0.98)
+```
+
+**Angulation & Flex**
+```javascript
+// Update body angulation (form quality)
+updateAngulation(absEdge, speed, currentCapacity, inputSmoothness, dt)
+// Returns: { angulationCapacity, angulationNeeded, angulationQuality }
+
+// Board flex energy accumulation
+updateBoardFlex(currentFlex, flexEnergy, edgeAngle, railStrength, dt)
+// Returns: { boardFlex, flexEnergy }
+```
+
+**Edge Transitions**
+```javascript
+// Detect and score edge-to-edge transitions
+detectEdgeTransition(previousSign, currentAngle, threshold)
+// Returns: boolean
+
+// Calculate timing multiplier for transition rhythm
+calculateTransitionTiming(timeSinceLastTransition, sweetSpotCenter)
+// Returns: number (0.4-1.175)
+
+// Evaluate arc shape quality
+evaluateArcShape(arcAngle)
+// Returns: { arcType: 'C-turn'|'J-turn'|'wiggle', multiplier: number }
+```
+
+**Flow State**
+```javascript
+// Update flow momentum and state
+updateFlowState(flowMomentum, flowState, arcType, timingMultiplier, carvePerfection, dt)
+// Returns: { flowMomentum, flowState }
+```
+
+**Risk System**
+```javascript
+// Calculate and update risk level
+updateRiskState(currentRisk, gripDeficit, edgeChangeRate, dt)
+// Returns: number (0-1)
+```
+
+**Configuration**
+```javascript
+export const CARVE_CONFIG = {
+  maxEdge: 1.15,           // Max edge angle (radians)
+  edgeSpring: 25,          // Spring stiffness
+  baseDamping: 8,          // Base damping
+  railDampingBonus: 4,     // Extra damping when railed
+  carveRailThreshold: 0.5, // Edge angle to engage rail
+  railBuildRate: 2.0,      // How fast rail builds
+  railDecayRate: 3.0,      // How fast rail decays
+  // ... more parameters
+};
+```
+
+### Physics Utils (`src/physics-utils.js`)
+
+Pure calculation functions used across physics systems.
+
+**Turn Geometry**
+```javascript
+calculateTurnRadius(sidecutRadius, edgeAngle, pressureEffect)
+// Returns: effective turn radius in meters
+
+calculateGForce(speed, turnRadius)
+// Returns: G-force multiplier (1.0 = normal gravity)
+```
+
+**Grip Calculations**
+```javascript
+calculateBaseGrip(edgeAngle)
+// Returns: base grip from edge angle (0.7 + edge bonus)
+
+calculateRailGripBonus(railStrength)
+// Returns: grip bonus from rail engagement (0-0.15)
+
+calculateTotalGrip(base, railBonus, angulationBonus, flowBonus, biteBonus, snowModifier)
+// Returns: total grip clamped to 0.98 max
+```
+
+**Transition Scoring**
+```javascript
+calculateTransitionTimingMultiplier(elapsed, sweetSpot)
+// Returns: timing quality (0.4-1.175)
+
+evaluateArcShape(totalHeadingChange)
+// Returns: { type, multiplier }
+```
+
+## Development Tools
+
+### Testing (Vitest)
+
+137 unit tests covering physics calculations.
+
+```bash
+npm test              # Run all tests
+npm run test:watch    # Watch mode
+npm run test:coverage # Coverage report
+```
+
+**Test Files**
+| File | Tests | Coverage |
+|------|-------|----------|
+| `tests/types.test.js` | 22 | Factory functions, validators |
+| `tests/physics-utils.test.js` | 56 | Pure calculations |
+| `tests/CarvePhysicsPure.test.js` | 59 | Physics state updates |
+
+**Testing Philosophy**
+- All physics functions are pure (input → output)
+- No mocking required for core physics
+- Each function tested in isolation
+- Edge cases covered (zero values, extremes, NaN)
+
+### Code Quality
+
+**ESLint** (`eslint.config.js`)
+```bash
+npm run lint          # Check for issues
+npm run lint:fix      # Auto-fix issues
+```
+
+**Prettier** (`.prettierrc`)
+```bash
+npm run format        # Format all files
+npm run format:check  # Check formatting
+```
+
 ### PlayerController (`src/PlayerController.js`)
 
 Core class that orchestrates all physics systems. Contains all state variables and the main update loop.

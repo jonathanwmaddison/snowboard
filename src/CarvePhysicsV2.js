@@ -488,7 +488,7 @@ export function updateTurnPhase(dt, edgeAngle) {
         }
         break;
 
-      case 'apex':
+      case 'apex': {
         // Check if edge is releasing (starting exit)
         const edgeDecreasing = Math.abs(v2.targetEdgeAngle) < absEdge * 0.8;
         if (v2.turnPhaseTime > config.apexHoldMin && edgeDecreasing) {
@@ -496,6 +496,7 @@ export function updateTurnPhase(dt, edgeAngle) {
           v2.turnPhaseTime = 0;
         }
         break;
+      }
 
       case 'exit':
         // Check if turn is complete
