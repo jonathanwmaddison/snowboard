@@ -13,10 +13,10 @@ import * as THREE from 'three';
  * @param {number} maxEdge - Maximum edge angle in radians
  */
 export function updateEdgeAngle(dt, maxEdge = 1.15) {
-  // Target edge from steer input
-  // Lean forward slightly increases edge commitment
+  // Flip steer when switch so A/D still work correctly
+  const steer = this.ridingSwitch ? -this.input.steer : this.input.steer;
   const leanBonus = this.input.lean > 0 ? this.input.lean * 0.1 : 0;
-  this.targetEdgeAngle = this.input.steer * maxEdge * (1 + leanBonus);
+  this.targetEdgeAngle = steer * maxEdge * (1 + leanBonus);
 
   // Spring-damper for edge angle (smooth, physical feel)
   const edgeSpring = 70;  // Snappier response
@@ -620,7 +620,9 @@ export function updateTurnPhysics(dt, absEdge, edgeSign, speed2D) {
       const sinEdge = Math.sin(absEdge);
       const turnRadius = this.sidecutRadius / Math.max(sinEdge, 0.1);
       const baseAngularVel = (speed2D / turnRadius) * 1.3;
-      targetAngularVel = baseAngularVel * edgeSign;
+      // Flip turn direction when switch
+      const turnMult = this.ridingSwitch ? -1 : 1;
+      targetAngularVel = baseAngularVel * edgeSign * turnMult;
     }
 
     // Turn inertia system

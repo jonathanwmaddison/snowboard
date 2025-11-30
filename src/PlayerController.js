@@ -191,6 +191,12 @@ export class PlayerController {
     this.grindTime = 0;
     this.grindSparks = [];
 
+    // === SWITCH RIDING ===
+    this.ridingSwitch = false;
+    this.switchBlend = 0;
+    this.smoothSwitchMult = 1; // Smooth multiplier for physics (-1 to 1)
+    this.switchLockTime = 0; // Prevents rapid switch flickering
+
     // === GLB MODEL ===
     this.playerModelGLB = null;
     this.glbModelUrl = null;
@@ -333,6 +339,10 @@ export class PlayerController {
       Math.sin(this.heading)
     );
 
+    // Simple switch detection: are we going backwards?
+    const forwardSpeed = this.velocity.dot(forward);
+    this.ridingSwitch = forwardSpeed < -1;
+
     // Weight transfer
     this.weightForward = THREE.MathUtils.lerp(this.weightForward, this.input.lean * 0.8, 6 * dt);
 
@@ -388,8 +398,7 @@ export class PlayerController {
     const slopeSteepness = 1 - this.groundNormal.y;
     const gravityAccel = g * slopeSteepness * 5.5;
 
-    // Velocity components
-    const forwardSpeed = this.velocity.dot(forward);
+    // Velocity components (forwardSpeed already calculated above for switch detection)
     const lateralSpeed = this.velocity.dot(right);
 
     // Track slip angle
@@ -429,12 +438,12 @@ export class PlayerController {
     // Apply grip
     const newLateralSpeed = lateralSpeed * (1 - finalGrip);
 
-    // Carve acceleration
-    CarvePhysics.applyCarveAcceleration.call(this, dt, absEdge, speed2D, forward);
-
-    // Reconstruct velocity
+    // Reconstruct velocity first
     this.velocity.x = forward.x * forwardSpeed + right.x * newLateralSpeed;
     this.velocity.z = forward.z * forwardSpeed + right.z * newLateralSpeed;
+
+    // Carve acceleration (after reconstruction so it's not overwritten)
+    CarvePhysics.applyCarveAcceleration.call(this, dt, absEdge, speed2D, forward);
 
     // Gravity
     this.velocity.x += slopeDir.x * gravityAccel * dt;
@@ -756,6 +765,12 @@ export class PlayerController {
     this.grindProgress = 0;
     this.grindBalance = 0;
     this.grindTime = 0;
+
+    // Reset switch state
+    this.ridingSwitch = false;
+    this.switchBlend = 0;
+    this.smoothSwitchMult = 1;
+    this.switchLockTime = 0;
 
     // Reset animation state
     PlayerAnimation.resetAnimState.call(this);
