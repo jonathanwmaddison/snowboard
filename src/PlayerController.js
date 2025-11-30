@@ -2,6 +2,8 @@ import * as THREE from 'three';
 
 // Import physics modules
 import * as CarvePhysics from './CarvePhysics.js';
+import * as CarvePhysicsV2 from './CarvePhysicsV2.js';
+import * as SkiPhysics from './SkiPhysics.js';
 import * as AirGrindPhysics from './AirGrindPhysics.js';
 import * as PlayerAnimation from './PlayerAnimation.js';
 
@@ -21,7 +23,7 @@ export class PlayerController {
     this.boardWidth = 0.3;
 
     // Input state
-    this.input = { steer: 0, lean: 0, jump: false };
+    this.input = { steer: 0, lean: 0, jump: false, switchStance: false, shift: false };
 
     // Core physics
     this.mass = 75;
@@ -197,9 +199,21 @@ export class PlayerController {
     this.smoothSwitchMult = 1; // Smooth multiplier for physics (-1 to 1)
     this.switchLockTime = 0; // Prevents rapid switch flickering
 
+    // === HOCKEY STOP STATE ===
+    this.hockeyStopStrength = 0;
+
     // === GLB MODEL ===
     this.playerModelGLB = null;
     this.glbModelUrl = null;
+
+    // === CARVE PHYSICS VERSION ===
+    this.carvePhysicsVersion = 1;  // 1 = v1 (original), 2 = v2 (realistic)
+    this.v2 = null;  // V2 state initialized on first use
+    this.inputMode = 'keyboard';  // 'keyboard', 'gamepad', 'analog'
+
+    // === SPORT TYPE ===
+    this.sportType = 'snowboard';  // 'snowboard' or 'ski'
+    this.ski = null;  // Ski state initialized on first use
   }
 
   init(startPosition) {
@@ -339,6 +353,20 @@ export class PlayerController {
       Math.sin(this.heading)
     );
 
+    // Branch based on sport type first
+    if (this.sportType === 'ski') {
+      this.updateGroundedPhysicsSki(dt, pos, speed2D, forward, right);
+      return;
+    }
+
+    // Branch based on carve physics version (snowboard)
+    if (this.carvePhysicsVersion === 2) {
+      this.updateGroundedPhysicsV2(dt, pos, speed2D, forward, right);
+      return;
+    }
+
+    // === V1 PHYSICS (original snowboard) ===
+
     // Simple switch detection: are we going backwards?
     const forwardSpeed = this.velocity.dot(forward);
     this.ridingSwitch = forwardSpeed < -1;
@@ -466,19 +494,18 @@ export class PlayerController {
       this.velocity.z += forward.z * thrust * dt;
     }
 
-    // Braking
-    if (this.input.lean < -0.2 && speed2D > 2) {
+    // Hockey stop (S + A/D) - turns board perpendicular and scrubs speed
+    const hockeyStopResult = CarvePhysics.updateHockeyStop.call(this, dt, absEdge, edgeSign, speed2D, forward, right);
+
+    // Simple braking (S only, no steering) - only when NOT doing hockey stop
+    if (!hockeyStopResult.isActive && this.input.lean < -0.2 && speed2D > 2) {
       const brakeIntensity = Math.abs(this.input.lean + 0.2) / 0.8;
-      const brakePower = brakeIntensity * speed2D * 0.15;
+      const brakePower = brakeIntensity * speed2D * 0.08;  // Gentler brake without hockey stop
 
       this.velocity.x -= (this.velocity.x / speed2D) * brakePower * dt;
       this.velocity.z -= (this.velocity.z / speed2D) * brakePower * dt;
 
-      if (brakeIntensity > 0.5) {
-        this.carveRailStrength *= (1 - brakeIntensity * 0.5 * dt * 10);
-      }
-
-      this.targetCompression = Math.max(this.targetCompression, brakeIntensity * 0.4);
+      this.targetCompression = Math.max(this.targetCompression, brakeIntensity * 0.3);
     }
 
     // Speed limits
@@ -513,6 +540,252 @@ export class PlayerController {
 
     // Store spin momentum for jumps
     this.spinVelocity = this.headingVelocity * 0.3;
+  }
+
+  /**
+   * V2 Grounded Physics - Realistic carving model
+   */
+  updateGroundedPhysicsV2(dt, pos, speed2D, forward, right) {
+    const g = 9.81;
+
+    // Initialize v2 state if needed
+    if (!this.v2) {
+      CarvePhysicsV2.initV2State.call(this);
+    }
+
+    // Get snow conditions
+    if (this.terrain) {
+      this.currentSnowCondition = this.terrain.getSnowCondition(pos.x, pos.z);
+    }
+
+    // Switch detection from velocity
+    const forwardSpeed = this.velocity.dot(forward);
+    if (!this.v2.isSwitch) {
+      this.ridingSwitch = forwardSpeed < -1;
+    } else {
+      this.ridingSwitch = true;
+    }
+
+    // === V2 CARVE PHYSICS ===
+    const carveResult = CarvePhysicsV2.updateCarvePhysicsV2.call(this, dt, speed2D, forward, right);
+
+    const absEdge = Math.abs(carveResult.edgeAngle);
+    const edgeSign = Math.sign(carveResult.edgeAngle);
+
+    // Update compression based on G-force
+    this.updateCompression(dt, absEdge, speed2D);
+
+    // Apply turn physics (heading changes)
+    CarvePhysicsV2.applyV2TurnPhysics.call(this, dt, speed2D);
+
+    // === PRESSURE-BASED PHYSICS ===
+    // Back weight (S key) shifts pressure to rear foot
+    // This loosens carve engagement and promotes skidding
+    // Skidding is what creates friction to slow down (not artificial braking)
+    // IMPORTANT: This must happen BEFORE applySkidFriction so the friction is applied correctly
+
+    const backWeight = this.input.lean < 0 ? Math.abs(this.input.lean) : 0;
+
+    if (backWeight > 0.1) {
+      // Shift pressure distribution to back foot
+      this.v2.pressureDistribution = THREE.MathUtils.lerp(
+        this.v2.pressureDistribution,
+        0.5 - backWeight * 0.3,  // Shift toward 0.2-0.5 range (back-weighted)
+        5 * dt
+      );
+
+      // Back weight reduces carve grip - board wants to skid
+      // This is the physical mechanism: rear-weighted = looser edge = drift
+      this.v2.carveQuality = Math.max(0, this.v2.carveQuality - backWeight * dt * 3);
+
+      // Increase slip angle proportional to back weight and any existing edge angle
+      // More edge + back weight = bigger skid (hockey stop physics)
+      // Even without edge, some slip angle from back-weighting (tail drag)
+      const baseSlip = backWeight * 0.25;  // Base tail drag
+      const edgeSlip = backWeight * absEdge * 0.8;  // Edge-enhanced skid
+      const skidPotential = baseSlip + edgeSlip;
+      this.v2.slipAngle = Math.max(this.v2.slipAngle, skidPotential);
+
+      // Force skid mode when back-weighted
+      // With edge: full hockey stop (more aggressive threshold)
+      // Without edge: tail drag mode (still slows you down)
+      if (backWeight > 0.3) {
+        this.v2.isCarving = false;
+        this.v2.isSkidding = true;
+      } else if (backWeight > 0.15 && absEdge > 0.1) {
+        // Lower thresholds when combining back-weight with any edge
+        this.v2.isCarving = false;
+        this.v2.isSkidding = true;
+      }
+
+      // Visual feedback - defensive crouch stance
+      this.targetCompression = Math.max(this.targetCompression, backWeight * 0.3);
+    }
+
+    // Apply grip (carve mode) - this reduces lateral sliding
+    CarvePhysicsV2.applyV2Grip.call(this, dt, forward, right);
+
+    // Apply skid friction if skidding - THIS IS HOW SNOWBOARDERS SLOW DOWN
+    // The back-weight handling above puts us in skid mode, then this applies friction
+    CarvePhysicsV2.applySkidFriction.call(this, dt, speed2D, forward, right);
+
+    // === GRAVITY & SLOPE ===
+    const slopeDir = this.getSlopeDirection();
+    const slopeSteepness = 1 - this.groundNormal.y;
+    const gravityAccel = g * slopeSteepness * 5.5;
+
+    this.velocity.x += slopeDir.x * gravityAccel * dt;
+    this.velocity.z += slopeDir.z * gravityAccel * dt;
+
+    // === DRAG ===
+    const baseDrag = 0.999;
+    const carveDrag = absEdge * 0.001;
+    const skidDrag = this.v2.isSkidding ? this.v2.slipAngle * 0.008 : 0;  // Increased skid drag
+    const snowDragMod = (this.currentSnowCondition.dragMultiplier - 1) * 0.003;
+    const drag = baseDrag - carveDrag - skidDrag - snowDragMod;
+    this.velocity.x *= drag;
+    this.velocity.z *= drag;
+
+    // === WEIGHT-BASED ACCELERATION ===
+    // Forward lean = tuck = acceleration
+    if (this.input.lean > 0.1) {
+      const tuck = this.input.lean;
+      const thrust = tuck * 2.0;
+      this.velocity.x += forward.x * thrust * dt;
+      this.velocity.z += forward.z * thrust * dt;
+    }
+
+    // === CARVE ACCELERATION (pumping) ===
+    // In v2, carve acceleration comes from G-force during clean carves
+    if (this.v2.isCarving && this.v2.gForce > 0.3) {
+      const pumpAccel = this.v2.gForce * this.v2.carveQuality * 1.5 * dt;
+      this.velocity.x += forward.x * pumpAccel;
+      this.velocity.z += forward.z * pumpAccel;
+    }
+
+    // === SPEED LIMITS ===
+    const maxSpeed = 55;
+    if (speed2D > maxSpeed) {
+      const scale = maxSpeed / speed2D;
+      this.velocity.x *= scale;
+      this.velocity.z *= scale;
+    }
+
+    // === JUMP SYSTEM ===
+    if (this.input.jump && !this.jumpCharging) {
+      this.jumpCharging = true;
+      this.jumpCharge = 0;
+    } else if (this.input.jump && this.jumpCharging) {
+      this.jumpCharge = Math.min(this.jumpCharge + dt / this.maxChargeTime, 1.0);
+    } else if (!this.input.jump && this.jumpCharging) {
+      AirGrindPhysics.initiateJump.call(this, speed2D, forward);
+      this.isGrounded = false;
+      this.jumpCharging = false;
+      this.jumpCharge = 0;
+    }
+
+    // === AIR ROTATION RESET ===
+    this.pitch = THREE.MathUtils.lerp(this.pitch, 0, 5 * dt);
+    this.roll = THREE.MathUtils.lerp(this.roll, 0, 5 * dt);
+    this.pitchVelocity *= 0.9;
+    this.rollVelocity *= 0.9;
+    this.spinVelocity = this.headingVelocity * 0.3;
+
+    // === SYNC LEGACY STATE FOR ANIMATION ===
+    // The animation system uses these v1 values
+    this.carveRailStrength = this.v2.isCarving ? this.v2.carveQuality : 0;
+    this.smoothedRailStrength = this.carveRailStrength;
+    this.carvePerfection = this.v2.carveQuality;
+    this.weightForward = (this.v2.pressureDistribution - 0.5) * 2;  // Map 0-1 to -1 to 1
+  }
+
+  /**
+   * Ski Grounded Physics
+   */
+  updateGroundedPhysicsSki(dt, pos, speed2D, forward, right) {
+    const g = 9.81;
+
+    // Initialize ski state if needed
+    if (!this.ski) {
+      SkiPhysics.initSkiState.call(this);
+    }
+
+    // Get snow conditions
+    if (this.terrain) {
+      this.currentSnowCondition = this.terrain.getSnowCondition(pos.x, pos.z);
+    }
+
+    // Switch detection (skiing is always forward-facing)
+    const forwardSpeed = this.velocity.dot(forward);
+    this.ridingSwitch = forwardSpeed < -1;
+
+    // === SKI PHYSICS ===
+    const skiResult = SkiPhysics.updateSkiPhysics.call(this, dt, speed2D, forward, right);
+
+    const absEdge = Math.abs(this.edgeAngle);
+
+    // Update compression based on G-force
+    this.updateCompression(dt, absEdge, speed2D);
+
+    // === GRAVITY & SLOPE ===
+    const slopeDir = this.getSlopeDirection();
+    const slopeSteepness = 1 - this.groundNormal.y;
+    const gravityAccel = g * slopeSteepness * 5.5;
+
+    this.velocity.x += slopeDir.x * gravityAccel * dt;
+    this.velocity.z += slopeDir.z * gravityAccel * dt;
+
+    // === DRAG ===
+    const baseDrag = 0.999;
+    const carveDrag = absEdge * 0.0008;  // Less drag from edge on skis
+    const skidDrag = !this.ski.isCarving ? 0.005 : 0;
+    const snowDragMod = (this.currentSnowCondition.dragMultiplier - 1) * 0.003;
+    const drag = baseDrag - carveDrag - skidDrag - snowDragMod;
+    this.velocity.x *= drag;
+    this.velocity.z *= drag;
+
+    // === WEIGHT-BASED ACCELERATION ===
+    // Forward lean = tuck = acceleration (same as snowboard)
+    if (this.input.lean > 0.1) {
+      const tuck = this.input.lean;
+      const thrust = tuck * 2.0;
+      this.velocity.x += forward.x * thrust * dt;
+      this.velocity.z += forward.z * thrust * dt;
+    }
+
+    // === CARVE ACCELERATION (pumping) ===
+    SkiPhysics.applySkiCarveAcceleration.call(this, dt, speed2D, forward);
+
+    // === SPEED LIMITS ===
+    const maxSpeed = 60;  // Skis can go a bit faster
+    if (speed2D > maxSpeed) {
+      const scale = maxSpeed / speed2D;
+      this.velocity.x *= scale;
+      this.velocity.z *= scale;
+    }
+
+    // === JUMP SYSTEM ===
+    if (this.input.jump && !this.jumpCharging) {
+      this.jumpCharging = true;
+      this.jumpCharge = 0;
+    } else if (this.input.jump && this.jumpCharging) {
+      this.jumpCharge = Math.min(this.jumpCharge + dt / this.maxChargeTime, 1.0);
+    } else if (!this.input.jump && this.jumpCharging) {
+      AirGrindPhysics.initiateJump.call(this, speed2D, forward);
+      this.isGrounded = false;
+      this.jumpCharging = false;
+      this.jumpCharge = 0;
+    }
+
+    // === AIR ROTATION RESET ===
+    this.pitch = THREE.MathUtils.lerp(this.pitch, 0, 5 * dt);
+    this.roll = THREE.MathUtils.lerp(this.roll, 0, 5 * dt);
+    this.pitchVelocity *= 0.9;
+    this.rollVelocity *= 0.9;
+    this.spinVelocity = this.headingVelocity * 0.3;
+
+    // Weight forward mapped from ski pressure
+    this.weightForward = this.input.lean;
   }
 
   updateCompression(dt, absEdge, speed2D) {
@@ -661,7 +934,74 @@ export class PlayerController {
       this.input.lean = Math.max(-1, Math.min(1, value));
     } else if (key === 'jump') {
       this.input.jump = value;
+    } else if (key === 'switchStance') {
+      this.input.switchStance = value;
+    } else if (key === 'shift') {
+      this.input.shift = value;
     }
+  }
+
+  /**
+   * Toggle between carve physics v1 and v2
+   * @returns {number} New version number
+   */
+  toggleCarvePhysicsVersion() {
+    this.carvePhysicsVersion = this.carvePhysicsVersion === 1 ? 2 : 1;
+    console.log(`Carve physics switched to v${this.carvePhysicsVersion}`);
+
+    // Initialize v2 state if switching to v2
+    if (this.carvePhysicsVersion === 2 && !this.v2) {
+      CarvePhysicsV2.initV2State.call(this);
+    }
+
+    return this.carvePhysicsVersion;
+  }
+
+  /**
+   * Set carve physics version directly
+   * @param {number} version - 1 or 2
+   */
+  setCarvePhysicsVersion(version) {
+    if (version !== 1 && version !== 2) return;
+    this.carvePhysicsVersion = version;
+
+    if (version === 2 && !this.v2) {
+      CarvePhysicsV2.initV2State.call(this);
+    }
+  }
+
+  /**
+   * Toggle between snowboard and ski
+   * @returns {string} New sport type
+   */
+  toggleSportType() {
+    this.sportType = this.sportType === 'snowboard' ? 'ski' : 'snowboard';
+    console.log(`Sport switched to: ${this.sportType}`);
+
+    // Initialize ski state if switching to ski
+    if (this.sportType === 'ski' && !this.ski) {
+      SkiPhysics.initSkiState.call(this);
+    }
+
+    // Update the visual model
+    PlayerAnimation.updateSportVisuals.call(this);
+
+    return this.sportType;
+  }
+
+  /**
+   * Set sport type directly
+   * @param {string} sport - 'snowboard' or 'ski'
+   */
+  setSportType(sport) {
+    if (sport !== 'snowboard' && sport !== 'ski') return;
+    this.sportType = sport;
+
+    if (sport === 'ski' && !this.ski) {
+      SkiPhysics.initSkiState.call(this);
+    }
+
+    PlayerAnimation.updateSportVisuals.call(this);
   }
 
   reset() {
@@ -772,8 +1112,45 @@ export class PlayerController {
     this.smoothSwitchMult = 1;
     this.switchLockTime = 0;
 
+    // Reset hockey stop state
+    this.hockeyStopStrength = 0;
+
+    // Reset v2 carve state
+    if (this.v2) {
+      CarvePhysicsV2.initV2State.call(this);
+    }
+
+    // Reset ski state
+    if (this.ski) {
+      SkiPhysics.initSkiState.call(this);
+    }
+
     // Reset animation state
     PlayerAnimation.resetAnimState.call(this);
+  }
+
+  /**
+   * Apply avalanche effect - slows player and adds wobble
+   */
+  applyAvalancheEffect(intensity) {
+    // Slow down significantly when caught
+    const dragFactor = 1 - (intensity * 0.15); // Up to 15% speed reduction per frame
+    this.velocity.multiplyScalar(dragFactor);
+    this.currentSpeed *= dragFactor;
+
+    // Add chaotic wobble
+    this.wobbleAmount = Math.max(this.wobbleAmount, intensity * 0.8);
+    this.riskLevel = Math.max(this.riskLevel, intensity);
+
+    // Mess with heading (tumbling in snow)
+    this.headingVelocity += (Math.random() - 0.5) * intensity * 2;
+
+    // If caught hard enough, trigger wipeout
+    if (intensity > 0.7) {
+      this.isWashingOut = true;
+      this.washOutIntensity = intensity;
+      this.washOutDirection = Math.sign(Math.random() - 0.5);
+    }
   }
 
   getPosition() {

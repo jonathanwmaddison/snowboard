@@ -78,6 +78,9 @@ export class PlayerModelGLB {
     this.loaded = false;
     this.model = null;
 
+    // Stance rotation - changes based on sport (snowboard = 90deg sideways, ski = 45deg forward)
+    this.stanceRotation = Math.PI / 2;  // Default: snowboard stance (90 degrees)
+
     // === SPRING-DAMPED BONE CONTROLLERS ===
     // Direct FK (forward kinematics) - set bone rotations directly
     this.springs = {
@@ -278,10 +281,18 @@ export class PlayerModelGLB {
   // Face sideways for snowboard stance and set initial pose
   applySnowboardStance() {
     if (!this.loaded || !this.model) return;
-    this.model.rotation.y = Math.PI / 2;
+    this.model.rotation.y = this.stanceRotation;
 
     // Apply initial snowboard stance pose
     this.applyBaseStance();
+  }
+
+  // Set stance rotation based on sport type
+  setStanceRotation(rotation) {
+    this.stanceRotation = rotation;
+    if (this.model) {
+      this.model.rotation.y = rotation;
+    }
   }
 
   /**
@@ -431,8 +442,8 @@ export class PlayerModelGLB {
     // === UPDATE ALL BONE SPRINGS ===
     this.updateAllBoneSprings(dt);
 
-    // Keep model facing sideways (snowboard stance)
-    this.model.rotation.y = Math.PI / 2;
+    // Keep model at correct stance rotation (snowboard = 90deg, ski = 45deg)
+    this.model.rotation.y = this.stanceRotation;
 
     // Subtle whole-body lean for extreme angles
     this.model.rotation.z = -edge * 0.1;
@@ -531,8 +542,8 @@ export class PlayerModelGLB {
     // Update all bones
     this.updateAllBoneSprings(dt);
 
-    // Model rotation for whole-body orientation
-    this.model.rotation.y = Math.PI / 2;
+    // Model rotation for whole-body orientation (use stance rotation)
+    this.model.rotation.y = this.stanceRotation;
     this.model.rotation.z = roll * 0.15;
     this.model.rotation.x = pitch * 0.1;
   }

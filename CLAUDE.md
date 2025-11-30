@@ -6,16 +6,19 @@ This is a snowboard game focused on **killer carves**. The physics system reward
 
 ## Key Components
 
-### Player Physics System (4 files)
+### Player Physics System (6 files)
 
 The physics engine is split into modular files for maintainability:
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `PlayerController.js` | ~780 | Core class, state, init, main update loop, ground detection |
-| `CarvePhysics.js` | ~490 | Edge control, grip, rail system, wash-out, flow state, turn physics |
+| `PlayerController.js` | ~1050 | Core class, state, init, main update loop, ground detection, sport/physics branching |
+| `CarvePhysics.js` | ~490 | V1: Edge control, grip, rail system, wash-out, flow state, turn physics |
+| `CarvePhysicsV2.js` | ~750 | V2: Realistic carving - stance, pressure, skid/carve, turn phases |
+| `SkiPhysics.js` | ~400 | Skiing physics - two independent skis, parallel turns, wedge brake |
 | `AirGrindPhysics.js` | ~260 | Air physics, grinding, jumping, landing |
-| `PlayerAnimation.js` | ~500 | Animation state, visual mesh, particles |
+| `PlayerAnimation.js` | ~700 | Animation state, visual mesh, particles, sport visuals |
+| `AvalancheSystem.js` | ~450 | Avalanche hazards, trigger zones, player collision, debris/dust particles |
 
 ### PlayerController (`src/PlayerController.js`)
 
@@ -117,6 +120,146 @@ All carving-related physics systems as exportable functions.
 - Turn inertia system for realistic momentum
 - Heading velocity smoothing
 
+### CarvePhysicsV2 (`src/CarvePhysicsV2.js`)
+
+V2 is the realistic carving model based on actual snowboard physics. Toggle with **P** key.
+
+**Key Differences from V1:**
+- V1 uses "carve rail" abstraction - edge angle engages a rail-like grip system
+- V2 uses real physics - centripetal force requirements vs available grip
+
+**Stance System**
+- `stance`: 'regular' or 'goofy' - determines edge mapping
+- `isSwitch`: Riding backwards applies penalties
+- Edge mapping: Left stick/A key → appropriate physical edge based on stance + direction
+
+**Pressure Distribution**
+- `pressureDistribution`: 0 = all back foot, 1 = all front foot, 0.5 = centered
+- Forward input (W/up) shifts weight forward (0.75) - drives turn initiation
+- Back input (S/down) shifts weight back (0.25) - loosens turn, enables skid
+
+**Skid vs Carve Physics**
+```
+required_centripetal = mass × velocity² / turn_radius
+available_grip = grip_coefficient × edge_penetration × normal_force
+
+if required_centripetal ≤ available_grip → Pure carve (board follows arc)
+if required_centripetal > available_grip → Skid (board drifts, friction scrubs speed)
+```
+
+**Turn Phases**
+- `initiation`: Entry phase, weight forward, edge angle building
+- `apex`: Maximum edge angle, centered weight, highest G-force
+- `exit`: Edge releasing, weight back, preparing for transition
+- `neutral`: Flat base between turns
+
+**Effective Turn Radius**
+```
+effective_radius = sidecut_radius × cos(edge_angle) × flex_modifier × pressure_effect
+```
+- Deeper edge = tighter radius
+- Forward pressure = tighter radius
+- Board flex allows even tighter turns
+
+**Switch Riding Penalties**
+- Response rate: 85% of normal (15% slower)
+- Max stable edge: 90% of normal (10% lower)
+- Grip: 92% of normal (8% less before slip)
+
+**Carve Quality** (`carveQuality` 0-1)
+- Builds during clean carves (no skidding)
+- Degrades rapidly when skidding
+- Affects grip bonus and visual spray intensity
+
+**V2 State Object** (accessed via `player.v2`)
+```javascript
+{
+  stance: 'regular',           // or 'goofy'
+  isSwitch: false,
+  currentEdge: 'toeside',      // 'heelside', 'flat'
+  physicalEdgeAngle: 0.8,      // radians
+  pressureDistribution: 0.6,   // 0-1
+  turnPhase: 'apex',
+  isCarving: true,
+  isSkidding: false,
+  slipAngle: 0,
+  gForce: 1.5,
+  effectiveTurnRadius: 5.2,    // meters
+  carveQuality: 0.9
+}
+```
+
+**Configuration** (`V2_CONFIG`)
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `sidecutRadius` | 7.5m | Board sidecut geometry |
+| `maxEdgeAngle` | 80° | Maximum possible edge angle |
+| `edgeResponseRate` | 8.0 | How fast edge changes |
+| `switchResponsePenalty` | 0.85 | Response in switch |
+| `switchGripPenalty` | 0.92 | Grip in switch |
+| `skidFriction` | 0.4 | Friction when skidding |
+| `baseGripCoefficient` | 0.85 | Base snow grip |
+
+### SkiPhysics (`src/SkiPhysics.js`)
+
+Skiing physics system. Toggle with **T** key.
+
+**Key Differences from Snowboarding:**
+- Two independent skis (can edge independently or together)
+- Narrower stance, forward-facing
+- Parallel turns (both skis same edge) vs wedge/snowplow
+- More agile turns, different weight distribution
+
+**Individual Ski State**
+- Each ski has: `edgeAngle`, `targetEdgeAngle`, `pressure`, `isCarving`
+- Left/right skis can edge independently or together
+- Weight distribution shifts to outside ski in turns
+
+**Turn Types**
+- `parallel`: Both skis edging in same direction (clean carving)
+- `wedge`: Skis form "V" shape for braking (snowplow)
+- `stem`: Transition between wedge and parallel
+- `neutral`: Flat base, no turning
+
+**Wedge/Snowplow Brake**
+- Activated by: back weight (S key) + minimal steer input
+- Skis form inward "V" shape (both on inside edges)
+- Friction increases with wedge angle
+- Primary speed control mechanism for beginners
+
+**Grip System**
+- Higher base grip with two edges (1.3 vs 1.2 for snowboard)
+- Weight distribution affects individual ski grip
+- Parallel carving bonus when both skis work together
+
+**Ski State Object** (accessed via `player.ski`)
+```javascript
+{
+  leftSki: { edgeAngle: 0.5, pressure: 0.6, isCarving: true },
+  rightSki: { edgeAngle: 0.5, pressure: 0.4, isCarving: true },
+  turnType: 'parallel',      // 'parallel', 'wedge', 'stem', 'neutral'
+  isParallel: true,
+  wedgeAngle: 0,             // Angle between skis
+  isBraking: false,
+  brakeIntensity: 0,
+  isCarving: true,
+  carveQuality: 0.9,
+  gForce: 1.2,
+  effectiveTurnRadius: 12,   // meters (longer than snowboard)
+}
+```
+
+**Configuration** (`SKI_CONFIG`)
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `skiLength` | 1.7m | Individual ski length |
+| `sidecutRadius` | 14m | Longer than snowboard for stability |
+| `maxEdgeAngle` | 70° | Can edge deeper than snowboard |
+| `edgeResponseRate` | 10.0 | Faster than snowboard |
+| `baseGripCoefficient` | 1.3 | Higher with two edges |
+| `wedgeBrakePower` | 2.5 | Brake friction multiplier |
+| `parallelCarveBonus` | 1.2 | Extra grip when parallel |
+
 ### AirGrindPhysics (`src/AirGrindPhysics.js`)
 
 Air physics, grinding, jumping, and landing systems.
@@ -192,6 +335,57 @@ Visual trail system showing carve marks in snow.
 - `trailLifetime = 15` seconds before fade starts
 - `fadeDuration = 5` seconds to fully disappear
 - Max 20 concurrent trails, 500 points each
+
+### AvalancheSystem (`src/AvalancheSystem.js`)
+
+Dynamic avalanche hazards that chase the player down the mountain.
+
+**Trigger System**
+- Trigger zones generated on steep terrain sections (slope > 0.25)
+- Player entering a trigger zone starts an avalanche uphill
+- Multiple avalanches can be active simultaneously
+- Manual trigger with **Y** key for testing
+
+**Avalanche Physics**
+- Starts slow (15 m/s), accelerates to faster than player (35 m/s max)
+- Grows in length and width as it picks up snow
+- Follows terrain center line while moving downhill
+- Two particle systems: debris chunks and powder dust cloud
+
+**Debris Particles** (500 particles)
+- Snow chunks with individual physics
+- Bounce off terrain, affected by gravity
+- Respawn at avalanche front to maintain density
+
+**Dust Cloud** (1000 particles)
+- Rises and spreads behind the debris
+- Soft additive blending for cloud effect
+- Fades in/out with avalanche lifecycle
+
+**Player Collision**
+- Detects when player is within avalanche bounds
+- Intensity based on position (stronger near center/front)
+- Effects: speed reduction, wobble, heading disruption
+- High intensity (>0.7) triggers full wipeout
+
+**Audio Integration**
+- Deep rumble sound based on distance to avalanche
+- Intensity scales with proximity (louder when closer)
+- Low-pass filtered brownian noise with resonance
+
+**State Object** (accessed via `avalancheSystem.getState()`)
+```javascript
+{
+  active: true,
+  count: 1,
+  avalanches: [{
+    z: -150,           // Front position
+    speed: 28,         // Current speed m/s
+    width: 90,         // Current width meters
+    length: 80         // Current length meters
+  }]
+}
+```
 
 ### CameraControllerV2 (`src/CameraControllerV2.js`)
 
@@ -379,8 +573,11 @@ Simple, intuitive controls focused on carving feel:
 - **R**: Reset position
 - **Z**: Zen mode (hide UI)
 - **G**: Start gate challenge (cycles: slalom → GS → freeride)
+- **Y**: Trigger avalanche (manual test)
 - **V**: Toggle camera version (v1 simple / v2 carve-reactive)
 - **C**: Cycle camera mode (v2 only: chase → cinematic → action → side)
+- **P**: Toggle carve physics (v1 original / v2 realistic)
+- **T**: Toggle sport type (snowboard / ski)
 - **M**: Toggle player model (v1 simple / v2 realistic)
 
 **Air Controls (while airborne)**

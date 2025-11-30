@@ -15,7 +15,11 @@ export class InputHandler {
       cameraPitch: null,
       cameraReset: null,
       toggleCameraVersion: null,
-      cycleCameraMode: null
+      cycleCameraMode: null,
+      toggleCarvePhysics: null,
+      togglePlayerModel: null,
+      toggleSportType: null,
+      triggerAvalanche: null
     };
 
     // Smoothed input state
@@ -236,6 +240,18 @@ export class InputHandler {
         break;
       case 'KeyC':
         if (this.callbacks.cycleCameraMode) this.callbacks.cycleCameraMode();
+        break;
+      case 'KeyP':
+        if (this.callbacks.toggleCarvePhysics) this.callbacks.toggleCarvePhysics();
+        break;
+      case 'KeyM':
+        if (this.callbacks.togglePlayerModel) this.callbacks.togglePlayerModel();
+        break;
+      case 'KeyT':
+        if (this.callbacks.toggleSportType) this.callbacks.toggleSportType();
+        break;
+      case 'KeyY':
+        if (this.callbacks.triggerAvalanche) this.callbacks.triggerAvalanche();
         break;
     }
   }

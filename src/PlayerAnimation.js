@@ -588,3 +588,176 @@ export function resetAnimState() {
     this.animState.gForceCompression = 1;
   }
 }
+
+// =============================================================================
+// SKI VISUALS
+// =============================================================================
+
+/**
+ * Create ski geometry (two individual skis)
+ */
+export function createSkiGeometry() {
+  const skiGroup = new THREE.Group();
+
+  // Ski dimensions
+  const skiLength = 1.7;
+  const skiWidth = 0.08;
+  const skiThickness = 0.02;
+  const stanceWidth = 0.25;  // Distance between skis (hip width)
+
+  // Material
+  const skiMaterial = new THREE.MeshStandardMaterial({
+    color: 0x2244aa,
+    roughness: 0.3,
+    metalness: 0.4,
+  });
+
+  const bindingMaterial = new THREE.MeshStandardMaterial({
+    color: 0x333333,
+    roughness: 0.6,
+    metalness: 0.3,
+  });
+
+  // Create left ski - rotated 90 degrees so tips point forward
+  const leftSki = createSingleSki(skiLength, skiWidth, skiThickness, skiMaterial, bindingMaterial);
+  leftSki.rotation.y = Math.PI / 2;  // Rotate 90 degrees - tips forward
+  leftSki.position.x = -stanceWidth / 2;
+  skiGroup.add(leftSki);
+
+  // Create right ski - rotated 90 degrees so tips point forward
+  const rightSki = createSingleSki(skiLength, skiWidth, skiThickness, skiMaterial, bindingMaterial);
+  rightSki.rotation.y = Math.PI / 2;  // Rotate 90 degrees - tips forward
+  rightSki.position.x = stanceWidth / 2;
+  skiGroup.add(rightSki);
+
+  // Store references for animation
+  skiGroup.userData.leftSki = leftSki;
+  skiGroup.userData.rightSki = rightSki;
+
+  return skiGroup;
+}
+
+/**
+ * Create a single ski with binding
+ */
+function createSingleSki(length, width, thickness, skiMaterial, bindingMaterial) {
+  const ski = new THREE.Group();
+
+  // Ski body - slightly curved shape
+  const shape = new THREE.Shape();
+  const halfLen = length / 2;
+  const halfWidth = width / 2;
+
+  // Create ski profile (top view)
+  shape.moveTo(-halfLen + 0.1, -halfWidth * 0.6);  // Tail
+  shape.quadraticCurveTo(-halfLen, 0, -halfLen + 0.1, halfWidth * 0.6);
+  shape.lineTo(halfLen - 0.15, halfWidth);  // Side
+  shape.quadraticCurveTo(halfLen, 0, halfLen - 0.15, -halfWidth);  // Tip
+  shape.lineTo(-halfLen + 0.1, -halfWidth * 0.6);  // Back to tail
+
+  const extrudeSettings = {
+    depth: thickness,
+    bevelEnabled: true,
+    bevelThickness: 0.003,
+    bevelSize: 0.003,
+    bevelSegments: 2,
+  };
+
+  const skiGeometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+  skiGeometry.rotateX(-Math.PI / 2);  // Lay flat
+  skiGeometry.translate(0, thickness / 2, 0);
+
+  const skiMesh = new THREE.Mesh(skiGeometry, skiMaterial);
+  ski.add(skiMesh);
+
+  // Metal edge
+  const edgeGeometry = new THREE.BoxGeometry(length - 0.1, 0.003, width + 0.005);
+  const edgeMaterial = new THREE.MeshStandardMaterial({
+    color: 0x888888,
+    roughness: 0.2,
+    metalness: 0.9,
+  });
+  const edge = new THREE.Mesh(edgeGeometry, edgeMaterial);
+  edge.position.y = 0.001;
+  ski.add(edge);
+
+  // Binding
+  const bindingGroup = new THREE.Group();
+
+  // Toe piece
+  const toePiece = new THREE.Mesh(
+    new THREE.BoxGeometry(0.06, 0.04, width * 1.2),
+    bindingMaterial
+  );
+  toePiece.position.set(0.1, thickness + 0.02, 0);
+  bindingGroup.add(toePiece);
+
+  // Heel piece
+  const heelPiece = new THREE.Mesh(
+    new THREE.BoxGeometry(0.08, 0.05, width * 1.1),
+    bindingMaterial
+  );
+  heelPiece.position.set(-0.12, thickness + 0.025, 0);
+  bindingGroup.add(heelPiece);
+
+  ski.add(bindingGroup);
+
+  return ski;
+}
+
+/**
+ * Update sport visuals - switch between snowboard and skis
+ */
+export function updateSportVisuals() {
+  if (!this.mesh || !this.boardMesh) return;
+
+  // Remove current board/ski mesh
+  this.mesh.remove(this.boardMesh);
+  if (this.boardMesh.geometry) {
+    this.boardMesh.geometry.dispose();
+  }
+  if (this.boardMesh.material) {
+    if (Array.isArray(this.boardMesh.material)) {
+      this.boardMesh.material.forEach(m => m.dispose());
+    } else {
+      this.boardMesh.material.dispose();
+    }
+  }
+
+  // Create new equipment based on sport type
+  if (this.sportType === 'ski') {
+    // Create ski mesh
+    this.boardMesh = createSkiGeometry();
+
+    // Rotate character to face forward for skiing (facing downhill)
+    if (this.playerModelGLB) {
+      this.playerModelGLB.setStanceRotation(0.15);  // Nearly forward facing (just ~8 degrees offset)
+    }
+    if (this.riderGroup && !this.playerModelGLB) {
+      this.riderGroup.rotation.y = -Math.PI / 2 + 0.15;  // Rotate placeholder too
+    }
+
+    console.log('Switched to ski visuals (character facing forward)');
+  } else {
+    // Create snowboard mesh
+    const boardGeometry = createSnowboardGeometry();
+    const boardMaterial = new THREE.MeshStandardMaterial({
+      color: 0x1a1a2e,
+      roughness: 0.4,
+      metalness: 0.2,
+    });
+    this.boardMesh = new THREE.Mesh(boardGeometry, boardMaterial);
+
+    // Reset character to sideways stance for snowboarding (90 degrees)
+    if (this.playerModelGLB) {
+      this.playerModelGLB.setStanceRotation(Math.PI / 2);  // 90 degrees - sideways
+    }
+    if (this.riderGroup && !this.playerModelGLB) {
+      this.riderGroup.rotation.y = 0;  // Reset placeholder
+    }
+
+    console.log('Switched to snowboard visuals');
+  }
+
+  this.mesh.add(this.boardMesh);
+}

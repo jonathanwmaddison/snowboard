@@ -40,6 +40,12 @@ export class AudioSystem {
     this.windNoiseNode = null;
     this.windFilterNode = null;
     this.windGainNode = null;
+
+    // Avalanche rumble
+    this.avalancheNoiseNode = null;
+    this.avalancheFilterNode = null;
+    this.avalancheGainNode = null;
+    this.avalancheRumbleIntensity = 0;
   }
 
   /**
@@ -61,6 +67,7 @@ export class AudioSystem {
       this.createSpraySound();
       this.createFlowAmbience();
       this.createWindSound();
+      this.createAvalancheSound();
 
       this.initialized = true;
       console.log('Audio system initialized');
@@ -213,6 +220,54 @@ export class AudioSystem {
   }
 
   /**
+   * Avalanche rumble - deep, menacing low-frequency rumble
+   */
+  createAvalancheSound() {
+    const bufferSize = this.context.sampleRate * 2;
+    const noiseBuffer = this.context.createBuffer(1, bufferSize, this.context.sampleRate);
+    const output = noiseBuffer.getChannelData(0);
+
+    // Very low frequency rumble (brownian noise + modulation)
+    let lastOut = 0;
+    for (let i = 0; i < bufferSize; i++) {
+      const white = Math.random() * 2 - 1;
+      // Slower brownian for deeper rumble
+      output[i] = (lastOut + (0.01 * white)) / 1.01;
+      lastOut = output[i];
+      // Add some grit
+      output[i] += Math.sin(i * 0.001) * 0.1 * (Math.random() * 0.5 + 0.5);
+      output[i] *= 5;
+    }
+
+    this.avalancheNoiseNode = this.context.createBufferSource();
+    this.avalancheNoiseNode.buffer = noiseBuffer;
+    this.avalancheNoiseNode.loop = true;
+
+    // Very low pass filter for rumble
+    this.avalancheFilterNode = this.context.createBiquadFilter();
+    this.avalancheFilterNode.type = 'lowpass';
+    this.avalancheFilterNode.frequency.value = 120;
+    this.avalancheFilterNode.Q.value = 1.5;
+
+    // Add some resonance for menace
+    const resonanceFilter = this.context.createBiquadFilter();
+    resonanceFilter.type = 'peaking';
+    resonanceFilter.frequency.value = 60;
+    resonanceFilter.Q.value = 3;
+    resonanceFilter.gain.value = 8;
+
+    this.avalancheGainNode = this.context.createGain();
+    this.avalancheGainNode.gain.value = 0;
+
+    this.avalancheNoiseNode.connect(this.avalancheFilterNode);
+    this.avalancheFilterNode.connect(resonanceFilter);
+    resonanceFilter.connect(this.avalancheGainNode);
+    this.avalancheGainNode.connect(this.masterGain);
+
+    this.avalancheNoiseNode.start();
+  }
+
+  /**
    * Play transition "pop" sound
    */
   playTransitionPop(intensity = 0.5) {
@@ -339,6 +394,37 @@ export class AudioSystem {
     // if (terrainSync > 0.7) {
     //   this.playTerrainSync();
     // }
+
+    // === AVALANCHE RUMBLE ===
+    this.updateAvalancheRumble(this.avalancheRumbleIntensity);
+  }
+
+  /**
+   * Set avalanche rumble intensity (called from game loop)
+   */
+  setAvalancheRumble(intensity) {
+    this.avalancheRumbleIntensity = intensity;
+  }
+
+  /**
+   * Update avalanche rumble sound
+   */
+  updateAvalancheRumble(intensity) {
+    if (!this.avalancheGainNode) return;
+
+    const time = this.context.currentTime;
+
+    if (intensity > 0.01) {
+      // Rumble volume based on intensity (distance)
+      const targetGain = Math.min(0.5, intensity * 0.5);
+      this.avalancheGainNode.gain.setTargetAtTime(targetGain, time, 0.1);
+
+      // Frequency shifts higher when closer (more urgent)
+      const targetFreq = 80 + intensity * 80;
+      this.avalancheFilterNode.frequency.setTargetAtTime(targetFreq, time, 0.1);
+    } else {
+      this.avalancheGainNode.gain.setTargetAtTime(0, time, 0.3);
+    }
   }
 
   /**

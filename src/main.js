@@ -13,6 +13,7 @@ import { AudioSystem } from './AudioSystem.js';
 import { CarveAnalyzer } from './CarveAnalyzer.js';
 import { Atmosphere } from './Atmosphere.js';
 import { GateSystem } from './GateSystem.js';
+import { AvalancheSystem } from './AvalancheSystem.js';
 
 class Game {
   constructor() {
@@ -32,6 +33,7 @@ class Game {
     this.carveAnalyzer = null;
     this.atmosphere = null;
     this.gateSystem = null;
+    this.avalancheSystem = null;
     this.zenMode = false;
     this.previousEdgeSide = 0;
     this.challengeMode = false;  // Gate challenge active
@@ -134,6 +136,19 @@ class Game {
       }
     };
 
+    // Create avalanche system
+    this.avalancheSystem = new AvalancheSystem(this.sceneManager, this.terrain, this.audioSystem);
+
+    // Setup avalanche callbacks
+    this.avalancheSystem.onAvalancheStart = (avalanche) => {
+      console.log('AVALANCHE! Outrun it!');
+    };
+
+    this.avalancheSystem.onPlayerCaught = (intensity) => {
+      console.log('Caught in avalanche!');
+      // Player wipeout handled in game loop
+    };
+
     // Create UI
     this.ui = new UIOverlay();
     this.ui.init(() => this.restart());
@@ -147,8 +162,10 @@ class Game {
     console.log('A/D or ←/→ = Turn | W = Tuck | S = Brake');
     console.log('Space = Jump (hold to charge)');
     console.log('IN AIR: A/D = Spin, W = Front flip, S = Back flip');
-    console.log('R = Restart, Z = Zen mode, G = Gates');
+    console.log('R = Restart, Z = Zen mode, G = Gates, Y = Avalanche!');
     console.log('V = Toggle camera (v1/v2), C = Cycle camera mode');
+    console.log('P = Toggle carve physics (v1 original / v2 realistic)');
+    console.log('T = Toggle sport (snowboard / ski)');
     console.log('Gamepad: L-stick control, R-stick camera, A jump');
 
     // Start game loop
@@ -223,6 +240,23 @@ class Game {
       }
     });
 
+    // Carve physics toggle (v1 <-> v2)
+    this.input.setCallback('toggleCarvePhysics', () => {
+      const version = this.player.toggleCarvePhysicsVersion();
+      console.log(`Carve Physics: V${version} ${version === 2 ? '(realistic - pressure/skid model)' : '(original - rail/flow model)'}`);
+    });
+
+    // Sport type toggle (snowboard <-> ski)
+    this.input.setCallback('toggleSportType', () => {
+      const sport = this.player.toggleSportType();
+      console.log(`Sport: ${sport} ${sport === 'ski' ? '(parallel turns, wedge brake)' : '(carving, edge transitions)'}`);
+    });
+
+    // Manual avalanche trigger (for testing)
+    this.input.setCallback('triggerAvalanche', () => {
+      this.avalancheSystem.triggerManual(this.player.getPosition());
+    });
+
   }
 
   toggleCameraVersion() {
@@ -273,6 +307,7 @@ class Game {
     this.player.reset();
     this.flowScore.reset();
     this.carveAnalyzer.reset();
+    this.avalancheSystem.reset();
     if (this.challengeMode) {
       this.gateSystem.resetCourse();
     }
@@ -344,6 +379,22 @@ class Game {
     // Update atmosphere (snow particles, fog)
     this.atmosphere.update(deltaTime, playerPos);
 
+    // Update avalanche system
+    const avalancheState = this.avalancheSystem.update(
+      deltaTime,
+      playerPos,
+      this.player.currentSpeed
+    );
+
+    // Handle avalanche catching player
+    if (avalancheState.caught) {
+      // Slow player down significantly when caught in avalanche
+      this.player.applyAvalancheEffect(avalancheState.intensity);
+    }
+
+    // Update avalanche audio rumble
+    this.audioSystem.setAvalancheRumble(avalancheState.rumbleIntensity);
+
     // Update gate challenge system
     if (this.challengeMode) {
       this.gateSystem.update(deltaTime, playerPos, this.player.currentSpeed);
@@ -373,9 +424,46 @@ class Game {
     flowDisplayState.arcType = this.player.arcType;
     flowDisplayState.carveChainCount = this.player.carveChainCount;
 
+    // Add v2 physics state if active
+    flowDisplayState.carvePhysicsVersion = this.player.carvePhysicsVersion;
+    flowDisplayState.sportType = this.player.sportType;
+    if (this.player.v2) {
+      flowDisplayState.v2 = {
+        isCarving: this.player.v2.isCarving,
+        isSkidding: this.player.v2.isSkidding,
+        slipAngle: this.player.v2.slipAngle,
+        turnPhase: this.player.v2.turnPhase,
+        gForce: this.player.v2.gForce,
+        carveQuality: this.player.v2.carveQuality,
+        pressureDistribution: this.player.v2.pressureDistribution,
+        currentEdge: this.player.v2.currentEdge,
+        isSwitch: this.player.v2.isSwitch,
+        effectiveTurnRadius: this.player.v2.effectiveTurnRadius
+      };
+    }
+
+    // Add ski state if skiing
+    if (this.player.ski) {
+      flowDisplayState.ski = {
+        turnType: this.player.ski.turnType,
+        isCarving: this.player.ski.isCarving,
+        isBraking: this.player.ski.isBraking,
+        wedgeAngle: this.player.ski.wedgeAngle,
+        gForce: this.player.ski.gForce,
+        leftEdge: this.player.ski.leftSki.edgeAngle,
+        rightEdge: this.player.ski.rightSki.edgeAngle,
+        carveQuality: this.player.ski.carveQuality,
+      };
+    }
+
     // Add gate state if challenge is active
     if (this.challengeMode) {
       flowDisplayState.gateState = this.gateSystem.getState();
+    }
+
+    // Add avalanche state
+    if (avalancheState.active) {
+      flowDisplayState.avalanche = this.avalancheSystem.getState();
     }
 
     this.flowUI.update(flowDisplayState);

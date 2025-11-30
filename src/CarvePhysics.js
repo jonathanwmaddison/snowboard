@@ -606,6 +606,88 @@ export function updateFlowState(dt) {
 }
 
 /**
+ * Hockey stop physics - pressing S + A/D turns board perpendicular and scrubs speed
+ * @param {number} dt - Delta time
+ * @param {number} absEdge - Absolute edge angle
+ * @param {number} edgeSign - Sign of edge angle
+ * @param {number} speed2D - Current 2D speed
+ * @param {THREE.Vector3} forward - Forward direction
+ * @param {THREE.Vector3} right - Right direction
+ * @returns {object} Hockey stop state { isActive, slipAngle, frictionForce }
+ */
+export function updateHockeyStop(dt, absEdge, edgeSign, speed2D, forward, right) {
+  // Check if hockey stop conditions are met: S pressed + A or D pressed
+  const isBraking = this.input.lean < -0.2;
+  const hasSteering = Math.abs(this.input.steer) > 0.2;
+
+  if (!isBraking || !hasSteering || speed2D < 2) {
+    // Decay hockey stop state
+    if (this.hockeyStopStrength > 0) {
+      this.hockeyStopStrength = Math.max(0, this.hockeyStopStrength - 3 * dt);
+    }
+    return { isActive: false, slipAngle: 0, frictionForce: 0 };
+  }
+
+  // Initialize hockey stop state if needed
+  if (this.hockeyStopStrength === undefined) {
+    this.hockeyStopStrength = 0;
+  }
+
+  // Build hockey stop strength based on input intensity
+  const brakeIntensity = Math.abs(this.input.lean + 0.2) / 0.8;  // 0 to 1
+  const steerIntensity = Math.abs(this.input.steer);  // 0 to 1
+  const combinedIntensity = brakeIntensity * steerIntensity;
+
+  // Ramp up hockey stop strength
+  this.hockeyStopStrength = THREE.MathUtils.lerp(
+    this.hockeyStopStrength,
+    combinedIntensity,
+    4 * dt
+  );
+
+  // Calculate current slip angle (angle between velocity and board heading)
+  const velHeading = Math.atan2(-this.velocity.x, this.velocity.z);
+  const currentSlipAngle = this.normalizeAngle(velHeading - this.heading);
+
+  // Target slip angle for hockey stop (perpendicular = 90 degrees = PI/2)
+  // Direction based on steering input
+  const targetSlipAngle = edgeSign * Math.PI * 0.45 * this.hockeyStopStrength;
+
+  // Increase heading rotation to bring board perpendicular
+  // This makes the board "swing out" for the hockey stop
+  const swingRate = this.hockeyStopStrength * 4.0;  // Rotation speed
+  const headingPush = edgeSign * swingRate * brakeIntensity;
+  this.headingVelocity += headingPush * dt;
+
+  // Calculate friction from sideways sliding
+  // More perpendicular = more friction = more speed scrub
+  const slipAngleMag = Math.abs(currentSlipAngle);
+  const frictionCoeff = 0.4 + this.hockeyStopStrength * 0.3;  // 0.4 to 0.7
+  const frictionForce = slipAngleMag * frictionCoeff * speed2D * this.hockeyStopStrength;
+
+  // Apply friction to reduce speed
+  const speedReduction = frictionForce * dt * 1.5;
+  const velocityMag = Math.sqrt(this.velocity.x ** 2 + this.velocity.z ** 2);
+  if (velocityMag > speedReduction) {
+    const scale = (velocityMag - speedReduction) / velocityMag;
+    this.velocity.x *= scale;
+    this.velocity.z *= scale;
+  }
+
+  // Visual feedback - defensive crouch
+  this.targetCompression = Math.max(this.targetCompression, this.hockeyStopStrength * 0.5);
+
+  // Reduce carve rail strength during hockey stop
+  this.carveRailStrength *= (1 - this.hockeyStopStrength * 0.8);
+
+  return {
+    isActive: true,
+    slipAngle: currentSlipAngle,
+    frictionForce: frictionForce
+  };
+}
+
+/**
  * Update turn physics with inertia
  * @param {number} dt - Delta time
  * @param {number} absEdge - Absolute edge angle
