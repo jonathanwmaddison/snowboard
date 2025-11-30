@@ -15,8 +15,7 @@ export class InputHandler {
       cameraPitch: null,
       cameraReset: null,
       toggleCameraVersion: null,
-      cycleCameraMode: null,
-      toggleModelVersion: null
+      cycleCameraMode: null
     };
 
     // Smoothed input state
@@ -237,9 +236,6 @@ export class InputHandler {
         break;
       case 'KeyC':
         if (this.callbacks.cycleCameraMode) this.callbacks.cycleCameraMode();
-        break;
-      case 'KeyM':
-        if (this.callbacks.toggleModelVersion) this.callbacks.toggleModelVersion();
         break;
     }
   }

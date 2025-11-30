@@ -223,11 +223,6 @@ class Game {
       }
     });
 
-    // Player model toggle (v1 simple <-> v2 realistic)
-    this.input.setCallback('toggleModelVersion', () => {
-      const version = this.player.toggleModelVersion();
-      console.log(`Player Model: V${version} ${version === 2 ? '(realistic)' : '(simple)'}`);
-    });
   }
 
   toggleCameraVersion() {

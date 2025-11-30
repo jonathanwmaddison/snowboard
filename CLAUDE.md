@@ -6,87 +6,173 @@ This is a snowboard game focused on **killer carves**. The physics system reward
 
 ## Key Components
 
+### Player Physics System (4 files)
+
+The physics engine is split into modular files for maintainability:
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `PlayerController.js` | ~780 | Core class, state, init, main update loop, ground detection |
+| `CarvePhysics.js` | ~490 | Edge control, grip, rail system, wash-out, flow state, turn physics |
+| `AirGrindPhysics.js` | ~260 | Air physics, grinding, jumping, landing |
+| `PlayerAnimation.js` | ~500 | Animation state, visual mesh, particles |
+
 ### PlayerController (`src/PlayerController.js`)
 
-The core physics engine handling all snowboard mechanics.
+Core class that orchestrates all physics systems. Contains all state variables and the main update loop.
 
-**Sidecut Geometry** (line 25)
-- `sidecutRadius = 7` meters - determines natural turn radius
-- Aggressive setting for responsive carving
+**Core State**
+- `sidecutRadius = 7` meters - determines natural turn radius (aggressive for killer carves)
+- `velocity`, `heading`, `edgeAngle` - primary movement state
+- `isGrounded`, `groundNormal`, `groundHeight` - terrain interaction
 
-**Edge Angle System** (lines 494-510)
+**Main Update Loop**
+- Ground detection via raycasting
+- Delegates to CarvePhysics for grounded physics
+- Delegates to AirGrindPhysics for air/grind physics
+- Delegates to PlayerAnimation for visual updates
+
+### CarvePhysics (`src/CarvePhysics.js`)
+
+All carving-related physics systems as exportable functions.
+
+**Edge Angle System** (`updateEdgeAngle`)
 - `maxEdge = 1.15` radians (~66 degrees) - allows deep carves
-- Edge angle directly controlled by steer input
+- Spring-damper physics for smooth, responsive edge control
 - Tracks `peakEdgeAngle` for carve quality scoring
 
-**Carve Rail System** (lines 32-36, 554-570)
+**Carve Rail System** (`updateCarveRail`)
 - `carveRailThreshold = 0.5` - edge angle to engage rail mode
 - `carveRailStrength` builds over time in deep carves (0-1)
 - `carveHoldTime` tracks sustained carve duration
 - Rail mode increases grip and stabilizes edge angle
 
-**Carve Chain Bonus** (lines 525-543)
+**Edge Transition System** (`handleEdgeTransition`)
+- Detects edge-to-edge switches (the "pop")
+- `edgeTransitionBoost` gives forward acceleration burst
+- Calculates timing multiplier for rhythm rewards
+- Determines arc shape (C-turn/J-turn/wiggle)
+
+**Carve Chain Bonus**
 - `carveChainCount` tracks consecutive clean carves (0-10)
 - Clean carve = peak edge > 0.5 rad AND hold time > 0.3s
 - Chain multiplier: 1.0 to 2.0x boost on transitions
 
-**Edge Transition Boost** (lines 519-548, 572-578)
-- Detects edge-to-edge switches (the "pop")
-- `edgeTransitionBoost` gives forward acceleration burst
-- Bigger boost from deeper previous carve and higher chain count
-
-**Carve Acceleration** (lines 665-676)
-- Deep carves generate speed (pumping physics)
-- Based on G-force: `(speed^2) / turnRadius`
-- Requires `carveRailStrength > 0.3` and `carvePerfection > 0.5`
-
-**Grip System** (lines 653-663)
+**Grip System** (`calculateGrip`)
 - Base grip: 0.7
 - Edge grip bonus: `absEdge * 0.3`
 - Rail grip bonus: `carveRailStrength * 0.15`
+- Edge bite bonus: up to 12% for sustained carves
+- Angulation bonus: proper form adds grip
 - Max grip: 0.98 (nearly locked in during deep carves)
 
-**Compression System** (lines 580-598)
-- G-force based compression during carves
-- `carveGForce = (speed * absEdge) / 15`
-- Deeper/faster = more rider compression
-- Edge switch triggers extension "pop"
-
-**Angulation System** (lines 804-823)
+**Angulation System** (`updateAngulation`)
 - Proper body angulation allows deeper edge hold without washing out
 - `angulationNeeded = (absEdge * speed) / 25` - more needed at high speed + deep edge
 - Jerky input degrades `angulationCapacity` (bad form)
 - Good angulation adds grip bonus and reduces wash-out risk by up to 50%
 
-**Board Flex System** (lines 825-837)
+**Board Flex System** (`updateBoardFlex`)
 - Board stores energy when flexed under carving load
 - `flexEnergy` accumulates during sustained deep carves
 - Released as extra "pop" boost on edge transitions (flexBoost = flexEnergy * 2.5)
 - Creates satisfying snap when transitioning between edges
 
-**Carve Flow State** (lines 166-177, 1171-1177)
+**Carve Flow State** (`updateFlowState`)
 - "In the zone" state that builds with consecutive perfect carves
 - `flowState` (0-1) provides: +50% carve acceleration, +8% grip, +30% transition boost
 - `flowMomentum` builds with clean carves (good arc + good timing)
 - Decays over time without perfect carves - maintains rhythm rewards
 
-**Arc Shape Tracking** (lines 990-1033)
+**Arc Shape Tracking** (`updateArcTracking`)
 - Tracks heading change to classify turn type
 - C-turn (>60°): Full carve, 1.3x multiplier - rewards completing the arc
 - J-turn (30-60°): Partial turn, 1.0x multiplier
 - Wiggle (<30°): Uncommitted, 0.5x multiplier - penalizes nervous wiggling
 
-**Edge Bite Progression** (lines 849-858)
+**Edge Bite Progression** (`updateEdgeBite`)
 - Edge grip builds over time as edge "bites" into snow
 - Faster bite buildup with good angulation and perfection
 - Adds up to 12% extra grip for sustained carves
 - Resets on edge transitions
 
-**Transition Timing Sweet Spot** (lines 990-1016)
+**Transition Timing Sweet Spot**
 - Optimal rhythm: 0.5-1.2 seconds between edge transitions
 - Sweet spot center at 0.8s gives up to 1.175x multiplier
 - Too fast (<0.3s): 0.4x penalty - panic wiggling
 - Too slow (>1.8s): 0.5x penalty - lost rhythm/momentum
+
+**Risk & Failure Systems** (`updateRiskAndWobble`, `updateEdgeCatchConsequences`)
+- Wash-out: edge slips when speed doesn't match edge angle
+- Edge catch: catching wrong edge during transition
+- Risk level affects wobble and grip degradation
+
+**Carve Acceleration** (`applyCarveAcceleration`)
+- Deep carves generate speed (pumping physics)
+- Based on G-force: `(speed^2) / turnRadius`
+- Requires `carveRailStrength > 0.3` and `carvePerfection > 0.5`
+
+**Turn Physics** (`updateTurnPhysics`)
+- Sidecut-based turn radius calculation
+- Turn inertia system for realistic momentum
+- Heading velocity smoothing
+
+### AirGrindPhysics (`src/AirGrindPhysics.js`)
+
+Air physics, grinding, jumping, and landing systems.
+
+**Air Physics** (`updateAirPhysics`)
+- Gravity with ramp (increases over air time)
+- Spin control (Y-axis rotation)
+- Flip control (pitch - front/back flips)
+- Roll/grab style
+- Air steering (subtle trajectory adjustment)
+
+**Jump System** (`initiateJump`)
+- Tap = tiny hop, Hold = bigger ollie
+- Charge bonus scales with hold time
+- Tail pop bonus for proper ollie technique
+- Compression snap adds extra height
+
+**Landing** (`onLanding`)
+- Landing quality based on pitch/roll/heading alignment
+- Impact effects scale with fall speed
+- Clean landing bonus for stomped landings
+- Bad landing causes wobble and speed loss
+
+**Grinding System** (`startGrind`, `updateGrindPhysics`, `endGrind`)
+- Balance system using steer input
+- Rail movement with low friction
+- Pop off at rail end
+
+### PlayerAnimation (`src/PlayerAnimation.js`)
+
+Animation state, visual updates, mesh creation, and particles.
+
+**Mesh Creation**
+- `createVisualMesh` - delegates to GLB or placeholder
+- `createPlaceholderMesh` - simple capsule until GLB loads
+- `createVisualMeshGLB` - full GLB model setup
+- `loadGLBModel` - async GLB loading
+
+**Animation State** (`updateAnimationState`)
+- G-force based leg compression
+- Front/back leg differential for weight shift
+- Ankle flex for edge pressure
+- Hip height and lateral shift
+- Angulation and counter-rotation
+- Arm dynamics for balance
+- Failure state overrides (wash-out, edge catch wobble)
+
+**Visual Updates** (`updateMesh`)
+- Position sync with physics body
+- Board orientation (heading, slope alignment, edge tilt, weight shift)
+- Air rotation (pitch, roll, heading)
+
+**Spray Particles** (`createSprayParticles`, `updateSprayParticles`)
+- Particle count scales with `carveRailStrength`
+- `carveBoost` multiplier for spray velocity
+- More dramatic during committed carves
 
 ### CarveMarks (`src/CarveMarks.js`)
 
@@ -106,12 +192,6 @@ Visual trail system showing carve marks in snow.
 - `trailLifetime = 15` seconds before fade starts
 - `fadeDuration = 5` seconds to fully disappear
 - Max 20 concurrent trails, 500 points each
-
-### Snow Spray Particles (`src/PlayerController.js:225-310`)
-
-- Particle count scales with `carveRailStrength`
-- `carveBoost` multiplier for spray velocity
-- More dramatic during committed carves
 
 ### CameraControllerV2 (`src/CameraControllerV2.js`)
 
@@ -145,7 +225,7 @@ Centered chase camera system (v2). Stays behind the rider at all times. The orig
 
 ### PlayerModelV2 (`src/PlayerModelV2.js`)
 
-Realistic snowboarder model (v2). The original simple model remains in PlayerController for comparison. Press **M** to toggle between versions.
+Realistic snowboarder model (v2). A placeholder capsule model is used until a GLB model is loaded.
 
 **Features**
 - **Anatomically correct proportions**: ~1.75m tall rider with proper limb ratios
@@ -223,6 +303,27 @@ Auto-maps these Mixamo-standard bone names:
 **Pre-downloaded Test Models** (in `public/models/`)
 - `test-character.glb` - Three.js Soldier (2.1MB)
 - `robot.glb` - Robot character (453KB)
+
+**GLB Bone Rotation Notes**
+
+Models typically come in T-pose. The model is rotated 90° on Y (`Math.PI/2`) to face sideways for snowboard stance. Bone rotations use Euler angles (X, Y, Z) via `SpringDamper3` for smooth animation.
+
+| Body Part | Axis | Direction | Notes |
+|-----------|------|-----------|-------|
+| **Arms (both)** | X | +1.2 rad down | Both left AND right arms use positive X to rotate down from T-pose |
+| **Thighs (UpLeg)** | X | negative = forward | Hip flexion for knee bend stance |
+| **Shins (Leg)** | X | positive = bend | Knee flexion |
+| **Feet** | X | 0 = flat | Keep at 0 for flat feet on board |
+| **Spine** | Z | lean into turn | Negative edge → positive Z lean |
+| **Spine** | X | forward tuck | Speed tuck |
+| **Spine** | Y | counter-rotation | Twist opposite to turn direction |
+
+**Key Learnings**
+- Left and right arms do NOT mirror (both use +X to go down)
+- Leg bones DO mirror (left uses -X for thigh forward, right uses +X)
+- Feet should stay at (0,0,0) for flat on board
+- Test one bone at a time when debugging
+- The model's Y rotation affects which local axis does what
 
 ## Physics Flow
 
