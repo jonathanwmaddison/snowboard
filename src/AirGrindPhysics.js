@@ -106,9 +106,10 @@ export function updateAirPhysics(dt, pos) {
   // Track air time
   this.airTime += dt;
 
-  // Gravity with ramp
-  const baseGravity = 16;
-  const gravityRamp = Math.min(this.airTime * 2, 6);
+  // Gravity with ramp - use moon gravity when on the moon for HUGE jumps!
+  const moonGravityRatio = this.onMoon ? 0.165 : 1.0;  // Moon is 16.5% of Earth
+  const baseGravity = 16 * moonGravityRatio;
+  const gravityRamp = Math.min(this.airTime * 2, 6) * moonGravityRatio;
   const gravity = baseGravity + gravityRamp;
   this.velocity.y -= gravity * dt;
 
@@ -147,9 +148,10 @@ export function updateAirPhysics(dt, pos) {
   this.velocity.x *= dragFactor;
   this.velocity.z *= dragFactor;
 
-  // Terminal velocity
-  if (this.velocity.y < -40) {
-    this.velocity.y = -40;
+  // Terminal velocity (much lower on moon due to less gravity)
+  const terminalVel = this.onMoon ? -15 : -40;
+  if (this.velocity.y < terminalVel) {
+    this.velocity.y = terminalVel;
   }
 
   // Air steering (subtle)
@@ -171,8 +173,9 @@ export function updateAirPhysics(dt, pos) {
  * @param {THREE.Vector3} forward - Forward direction
  */
 export function initiateJump(speed2D, forward) {
-  // Base tiny hop
-  let jumpPower = 2.5;
+  // Base tiny hop - boosted on moon!
+  const moonBoost = this.onMoon ? 1.8 : 1.0;  // 80% higher jumps on moon
+  let jumpPower = 2.5 * moonBoost;
 
   // Charge bonus
   const chargeBonus = this.jumpCharge * 3.0;

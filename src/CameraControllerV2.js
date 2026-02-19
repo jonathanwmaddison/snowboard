@@ -106,6 +106,27 @@ export class CameraControllerV2 {
     // === TERRAIN GRADIENT ===
     this.terrainGradient = 0;      // Slope steepness affects camera
 
+    // === CAMERA SHAKE ===
+    this.shakeIntensity = 0;       // Current shake intensity (0-1)
+    this.shakeDecay = 5;           // How fast shake decays
+    this.shakeFrequency = 25;      // Shake oscillation frequency
+    this.shakeOffset = new THREE.Vector3(); // Current shake offset
+    this.shakeTime = 0;            // Time accumulator for shake
+
+    // === RISK SHAKE ===
+    this.riskLevel = 0;            // Player risk level for continuous shake
+    this.riskShakeIntensity = 0;   // Smoothed risk shake
+
+    // === G-FORCE ===
+    this.gForce = 1.0;             // Current G-force for camera effects
+    this.smoothedGForce = 1.0;     // Smoothed G-force
+    this.gForceShakeIntensity = 0; // G-force based camera shake (subtle rumble)
+    this.carveRailStrength = 0;    // For quality-dependent shake
+
+    // === IMPACT EFFECTS ===
+    this.landingImpact = 0;        // Landing impact intensity
+    this.edgeCatchShake = 0;       // Edge catch shake intensity
+
     // Smoothing rates
     this.positionSmoothing = 0.08;
     this.heightSmoothing = 0.05;
@@ -141,9 +162,42 @@ export class CameraControllerV2 {
   }
 
   /**
+   * Update camera in FPS (first-person) mode
+   */
+  updateFPSMode(deltaTime, playerPosition, playerHeading) {
+    // Position camera at player's eye level
+    const eyeHeight = 1.7;  // Eye height in meters
+
+    // Camera position is at player's head
+    this.camera.position.set(
+      playerPosition.x,
+      playerPosition.y + eyeHeight,
+      playerPosition.z
+    );
+
+    // Look in the direction the player is facing
+    const lookDistance = 10;
+    const lookX = playerPosition.x - Math.sin(playerHeading) * lookDistance;
+    const lookZ = playerPosition.z + Math.cos(playerHeading) * lookDistance;
+    const lookY = playerPosition.y + eyeHeight;
+
+    this.camera.lookAt(lookX, lookY, lookZ);
+
+    // Set FOV for FPS (slightly wider for immersion)
+    this.camera.fov = 90;
+    this.camera.updateProjectionMatrix();
+  }
+
+  /**
    * Main update - call every frame
    */
-  update(deltaTime, playerPosition, playerVelocity, playerHeading, edgeAngle = 0, isGrounded = true, compression = 0, wasGrounded = true) {
+  update(deltaTime, playerPosition, playerVelocity, playerHeading, edgeAngle = 0, isGrounded = true, compression = 0, wasGrounded = true, fpsMode = false) {
+    // === FPS MODE ===
+    if (fpsMode) {
+      this.updateFPSMode(deltaTime, playerPosition, playerHeading);
+      return;
+    }
+
     const mode = this.modes[this.currentMode];
     const targetModeSettings = this.modes[this.targetMode];
 
@@ -212,9 +266,15 @@ export class CameraControllerV2 {
     );
 
     // === DYNAMIC HEIGHT ===
-    // Lower during high G-force/compression
+    // Lower during high G-force/compression - more dramatic response
+    // Use both player compression and G-force for camera lowering
+    const gForceCompression = this.gForce > 1.2 ? (this.gForce - 1) * 0.6 : 0;
+    const totalCompression = compression * 0.8 + gForceCompression;
+
+    // Faster response when compressing, slower release for dramatic effect
+    const compressionLerp = totalCompression > this.compressionEffect ? 0.15 : 0.06;
     this.compressionEffect = THREE.MathUtils.lerp(
-      this.compressionEffect, compression * 0.8, 0.1
+      this.compressionEffect, totalCompression, compressionLerp
     );
 
     // Get terrain gradient for height adjustment
@@ -225,7 +285,9 @@ export class CameraControllerV2 {
       }
     }
 
-    const targetHeight = activeMode.height - this.compressionEffect +
+    // Camera lowers more dramatically during high-G carves
+    const heightReduction = this.compressionEffect * (1 + gForceCompression * 0.3);
+    const targetHeight = activeMode.height - heightReduction +
                          this.terrainGradient * 0.5;
     this.smoothedHeight = THREE.MathUtils.lerp(
       this.smoothedHeight, targetHeight, this.heightSmoothing
@@ -254,21 +316,39 @@ export class CameraControllerV2 {
     );
 
     // === KEEP CAMERA ABOVE GROUND ===
-    if (this.terrain) {
+    // Skip terrain check if in space (high altitude) or if terrain returns invalid
+    const isInSpace = playerPosition.y > 150;
+    if (this.terrain && !isInSpace) {
       const groundHeight = this.terrain.getHeightAt(
         this.smoothedPosition.x,
         this.smoothedPosition.z
       );
-      const minHeight = groundHeight + 1.5;
-      if (this.smoothedPosition.y < minHeight) {
-        this.smoothedPosition.y = minHeight;
+      if (groundHeight !== undefined && !isNaN(groundHeight)) {
+        const minHeight = groundHeight + 1.5;
+        if (this.smoothedPosition.y < minHeight) {
+          this.smoothedPosition.y = minHeight;
+        }
       }
+    }
+
+    // === NaN PROTECTION ===
+    // Ensure camera position is valid
+    if (isNaN(this.smoothedPosition.x) || isNaN(this.smoothedPosition.y) || isNaN(this.smoothedPosition.z)) {
+      this.smoothedPosition.copy(playerPosition);
+      this.smoothedPosition.y += activeMode.height;
+      this.smoothedPosition.z -= activeMode.distance;
     }
 
     // === LOOK AT TARGET ===
     // Look slightly ahead of player based on velocity
     const lookAheadFactor = Math.min(this.currentSpeed / 50, 1) * 2;
-    const velocityNorm = playerVelocity.clone().normalize();
+
+    // Safely normalize velocity (handle zero/NaN cases)
+    let velocityNorm = new THREE.Vector3(0, 0, 1);
+    const velLength = playerVelocity.length();
+    if (velLength > 0.1 && !isNaN(velLength)) {
+      velocityNorm = playerVelocity.clone().divideScalar(velLength);
+    }
 
     const targetLookAt = new THREE.Vector3(
       playerPosition.x + velocityNorm.x * lookAheadFactor,
@@ -276,18 +356,38 @@ export class CameraControllerV2 {
       playerPosition.z + velocityNorm.z * lookAheadFactor
     );
 
-    this.smoothedLookAt.lerp(targetLookAt, this.lookAtSmoothing);
+    // Validate lookAt target
+    if (!isNaN(targetLookAt.x) && !isNaN(targetLookAt.y) && !isNaN(targetLookAt.z)) {
+      this.smoothedLookAt.lerp(targetLookAt, this.lookAtSmoothing);
+    }
+
+    // Ensure lookAt is valid
+    if (isNaN(this.smoothedLookAt.x) || isNaN(this.smoothedLookAt.y) || isNaN(this.smoothedLookAt.z)) {
+      this.smoothedLookAt.copy(playerPosition);
+    }
 
     // === DYNAMIC FOV ===
     const speedFovBoost = speedFactor * activeMode.speedFovBoost;
     const carveFovBoost = absEdge * activeMode.carveFovBoost;
     const flowFovBoost = this.flowIntensity * 5; // Subtle flow effect
 
-    const targetFov = activeMode.fovBase + speedFovBoost + carveFovBoost + flowFovBoost;
-    this.smoothedFov = THREE.MathUtils.lerp(this.smoothedFov, targetFov, this.fovSmoothing);
+    // G-force FOV boost - creates intense "zoom" feel during hard carves
+    const gForceFovBoost = this.smoothedGForce > 1.3 ?
+      (this.smoothedGForce - 1.3) * 8 : 0;
+
+    const targetFov = activeMode.fovBase + speedFovBoost + carveFovBoost +
+                      flowFovBoost + gForceFovBoost;
+
+    // Faster FOV response when increasing (snap), slower when decreasing (smooth release)
+    const fovLerp = targetFov > this.smoothedFov ? this.fovSmoothing * 1.5 : this.fovSmoothing;
+    this.smoothedFov = THREE.MathUtils.lerp(this.smoothedFov, targetFov, fovLerp);
+
+    // === CAMERA SHAKE ===
+    this.updateShake(deltaTime);
 
     // === APPLY TO CAMERA ===
     this.camera.position.copy(this.smoothedPosition);
+    this.camera.position.add(this.shakeOffset);
     this.camera.lookAt(this.smoothedLookAt);
 
     // Update FOV
@@ -302,10 +402,110 @@ export class CameraControllerV2 {
   }
 
   /**
+   * Update camera shake effects
+   */
+  updateShake(deltaTime) {
+    this.shakeTime += deltaTime;
+
+    // Decay one-shot shake effects
+    this.shakeIntensity = Math.max(0, this.shakeIntensity - this.shakeDecay * deltaTime);
+    this.landingImpact = Math.max(0, this.landingImpact - 8 * deltaTime);
+    this.edgeCatchShake = Math.max(0, this.edgeCatchShake - 4 * deltaTime);
+
+    // Smooth risk-based continuous shake
+    const targetRiskShake = this.riskLevel > 0.5 ? (this.riskLevel - 0.5) * 2 : 0;
+    this.riskShakeIntensity = THREE.MathUtils.lerp(
+      this.riskShakeIntensity, targetRiskShake, 5 * deltaTime
+    );
+
+    // === G-FORCE SHAKE (subtle rumble during hard carves) ===
+    // Only shake during quality carves (high rail strength)
+    const gForceThreshold = 1.5;
+    const targetGForceShake = (this.smoothedGForce > gForceThreshold && this.carveRailStrength > 0.5)
+      ? (this.smoothedGForce - gForceThreshold) * this.carveRailStrength * 0.4
+      : 0;
+    this.gForceShakeIntensity = THREE.MathUtils.lerp(
+      this.gForceShakeIntensity, targetGForceShake, 8 * deltaTime
+    );
+
+    // Combine all shake sources
+    const totalShake = this.shakeIntensity +
+                       this.landingImpact * 0.5 +
+                       this.edgeCatchShake * 0.8 +
+                       this.riskShakeIntensity * 0.3 +
+                       this.gForceShakeIntensity * 0.25;
+
+    if (totalShake > 0.01) {
+      // Multi-frequency shake for organic feel
+      const freq1 = this.shakeFrequency;
+      const freq2 = this.shakeFrequency * 1.7;
+      const freq3 = this.shakeFrequency * 0.6;
+
+      const shake1 = Math.sin(this.shakeTime * freq1);
+      const shake2 = Math.sin(this.shakeTime * freq2 + 1.3);
+      const shake3 = Math.sin(this.shakeTime * freq3 + 2.7);
+
+      // Randomize direction each frame for chaotic feel during high intensity
+      const chaos = totalShake > 0.3 ? (Math.random() - 0.5) * totalShake * 0.3 : 0;
+
+      this.shakeOffset.set(
+        (shake1 * 0.5 + shake2 * 0.3 + chaos) * totalShake * 0.15,
+        (shake2 * 0.4 + shake3 * 0.4 + Math.abs(chaos)) * totalShake * 0.1,
+        (shake3 * 0.3 + shake1 * 0.2 + chaos) * totalShake * 0.12
+      );
+    } else {
+      this.shakeOffset.set(0, 0, 0);
+    }
+  }
+
+  /**
+   * Trigger a one-shot camera shake
+   * @param {number} intensity - Shake intensity (0-1)
+   * @param {string} type - Type of shake: 'impact', 'edgeCatch', 'generic'
+   */
+  triggerShake(intensity, type = 'generic') {
+    switch (type) {
+      case 'impact':
+        this.landingImpact = Math.max(this.landingImpact, intensity);
+        break;
+      case 'edgeCatch':
+        this.edgeCatchShake = Math.max(this.edgeCatchShake, intensity);
+        break;
+      default:
+        this.shakeIntensity = Math.max(this.shakeIntensity, intensity);
+    }
+  }
+
+  /**
+   * Set continuous risk level for wobble shake
+   * @param {number} level - Risk level (0-1)
+   */
+  setRiskLevel(level) {
+    this.riskLevel = level;
+  }
+
+  /**
    * Set flow state intensity (0-1) for visual effects
    */
   setFlowState(intensity) {
     this.flowIntensity = THREE.MathUtils.lerp(this.flowIntensity, intensity, 0.05);
+  }
+
+  /**
+   * Set G-force for camera effects
+   */
+  setGForce(gForce) {
+    this.gForce = gForce;
+    // Smooth the G-force for visual effects
+    const lerpRate = gForce > this.smoothedGForce ? 0.15 : 0.08;
+    this.smoothedGForce = THREE.MathUtils.lerp(this.smoothedGForce, gForce, lerpRate);
+  }
+
+  /**
+   * Set carve rail strength for quality-dependent effects
+   */
+  setCarveRailStrength(strength) {
+    this.carveRailStrength = strength;
   }
 
   /**

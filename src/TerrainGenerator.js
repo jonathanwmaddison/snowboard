@@ -429,31 +429,45 @@ export class TerrainGenerator {
     geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geometry.computeVertexNormals();
 
-    // Custom shader for fine corduroy pattern
+    // Custom shader for fine corduroy pattern with enhanced snow sparkle
     const material = new THREE.ShaderMaterial({
       uniforms: {
         trailWidth: { value: this.trailWidth },
         trailLength: { value: this.length },
+        time: { value: 0 },
+        sunDirection: { value: new THREE.Vector3(0.4, 0.8, -0.4).normalize() },
+        cameraPosition: { value: new THREE.Vector3() }
       },
       vertexShader: `
         varying vec3 vColor;
         varying vec3 vWorldPos;
         varying vec3 vNormal;
+        varying vec3 vViewDir;
 
         void main() {
           vColor = color;
-          vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
-          vNormal = normalMatrix * normal;
+          vec4 worldPos = modelMatrix * vec4(position, 1.0);
+          vWorldPos = worldPos.xyz;
+          vNormal = normalize(normalMatrix * normal);
+          vViewDir = normalize(cameraPosition - worldPos.xyz);
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }
       `,
       fragmentShader: `
         uniform float trailWidth;
         uniform float trailLength;
+        uniform float time;
+        uniform vec3 sunDirection;
 
         varying vec3 vColor;
         varying vec3 vWorldPos;
         varying vec3 vNormal;
+        varying vec3 vViewDir;
+
+        // Simple hash for sparkle
+        float hash(vec2 p) {
+          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+        }
 
         void main() {
           vec3 baseColor = vColor;
@@ -462,11 +476,8 @@ export class TerrainGenerator {
           float isTrail = step(0.01, baseColor.b - baseColor.r);
 
           // Fine corduroy pattern - lines running down the trail (along X)
-          // ~3cm spacing for realistic groomed look
-          float corduroyFreq = 200.0; // Very fine lines
+          float corduroyFreq = 200.0;
           float corduroy = sin(vWorldPos.x * corduroyFreq);
-
-          // Sharpen the pattern
           corduroy = smoothstep(-0.3, 0.3, corduroy);
 
           // Subtle brightness variation (5% difference)
@@ -475,17 +486,58 @@ export class TerrainGenerator {
           // Apply corduroy to base color
           vec3 finalColor = baseColor * corduroyEffect;
 
-          // Simple lighting
-          vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
-          float diffuse = max(dot(vNormal, lightDir), 0.0);
-          float ambient = 0.4;
-          float light = ambient + diffuse * 0.6;
+          // === ENHANCED LIGHTING ===
+          vec3 lightDir = normalize(sunDirection);
 
-          gl_FragColor = vec4(finalColor * light, 1.0);
+          // Diffuse lighting
+          float NdotL = max(dot(vNormal, lightDir), 0.0);
+          float diffuse = NdotL;
+
+          // Soft shadows in grooves (ambient occlusion hint)
+          float ao = 1.0 - corduroyEffect * 0.1 * isTrail;
+
+          // Fresnel rim lighting (snow catches light at glancing angles)
+          float fresnel = pow(1.0 - max(dot(vNormal, vViewDir), 0.0), 3.0);
+          float rim = fresnel * 0.3;
+
+          // Specular highlight (sun reflection on snow)
+          vec3 halfDir = normalize(lightDir + vViewDir);
+          float spec = pow(max(dot(vNormal, halfDir), 0.0), 32.0) * 0.4;
+
+          // === SNOW SPARKLE ===
+          // Create random sparkle points based on position
+          vec2 sparkleCoord = floor(vWorldPos.xz * 15.0); // Grid of sparkle points
+          float sparkleRand = hash(sparkleCoord);
+
+          // Sparkle only triggers at certain viewing angles
+          float sparkleAngle = dot(vNormal, normalize(lightDir + vViewDir * 0.5));
+          float sparkleThreshold = 0.85 + sparkleRand * 0.1;
+
+          // Sparkle intensity varies with time for twinkle effect
+          float sparkleTime = sin(time * 3.0 + sparkleRand * 6.28) * 0.5 + 0.5;
+          float sparkle = step(sparkleThreshold, sparkleAngle) * sparkleTime * (1.0 - isTrail * 0.5);
+          sparkle *= step(0.7, sparkleRand); // Only some points sparkle
+
+          // Combine lighting
+          float ambient = 0.35;
+          float light = ambient + diffuse * 0.5 + rim;
+          light *= ao;
+
+          // Apply lighting and add sparkle/specular
+          finalColor = finalColor * light + vec3(spec) + vec3(sparkle * 0.8);
+
+          // Slight blue tint in shadows for snow
+          float shadow = 1.0 - NdotL;
+          finalColor = mix(finalColor, finalColor * vec3(0.9, 0.95, 1.1), shadow * 0.2);
+
+          gl_FragColor = vec4(finalColor, 1.0);
         }
       `,
       vertexColors: true,
     });
+
+    // Store material reference for updates
+    this.terrainMaterial = material;
 
     this.mesh = new THREE.Mesh(geometry, material);
     this.mesh.receiveShadow = true;
@@ -875,10 +927,23 @@ export class TerrainGenerator {
   }
 
   addTrees() {
-    const trunkGeo = new THREE.CylinderGeometry(0.3, 0.5, 4, 6);
-    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x3d2817, roughness: 0.9 });
-    const foliageGeo = new THREE.ConeGeometry(2.5, 7, 8);
-    const foliageMat = new THREE.MeshStandardMaterial({ color: 0x1a4d1a, roughness: 0.8 });
+    // Materials
+    const trunkMat = new THREE.MeshStandardMaterial({
+      color: 0x3d2817,
+      roughness: 0.9
+    });
+    const foliageMat = new THREE.MeshStandardMaterial({
+      color: 0x1a4d2a,
+      roughness: 0.85
+    });
+    const snowMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      roughness: 0.8,
+      metalness: 0.1
+    });
+
+    // Create instanced geometries for performance
+    const trunkGeo = new THREE.CylinderGeometry(0.25, 0.4, 3.5, 6);
 
     const treeGroup = new THREE.Group();
     const spacing = 15;
@@ -887,7 +952,7 @@ export class TerrainGenerator {
       for (let x = -this.width / 2 + 10; x < this.width / 2 - 10; x += spacing) {
         // Only place trees OFF the trail
         const trailDist = this.getTrailDistance(x, z);
-        if (trailDist < 1.5) continue; // Keep buffer around trail
+        if (trailDist < 1.5) continue;
 
         // Random offset
         const ox = (this.noise.noise2D(x * 0.1, z * 0.1) - 0.5) * spacing * 0.6;
@@ -899,28 +964,118 @@ export class TerrainGenerator {
         if (this.detailNoise.noise2D(treeX * 0.05, treeZ * 0.05) < 0.2) continue;
 
         const height = this.calculateHeight(treeX, treeZ);
-        const scale = 0.6 + Math.random() * 0.5;
+        const scale = 0.7 + Math.random() * 0.5;
+        const treeHeight = 8 * scale;
 
         const tree = new THREE.Group();
 
+        // Trunk
         const trunk = new THREE.Mesh(trunkGeo, trunkMat);
         trunk.scale.setScalar(scale);
-        trunk.position.y = 2 * scale;
+        trunk.position.y = 1.75 * scale;
         trunk.castShadow = true;
         tree.add(trunk);
 
-        const foliage = new THREE.Mesh(foliageGeo, foliageMat);
-        foliage.scale.setScalar(scale);
-        foliage.position.y = 6 * scale;
-        foliage.castShadow = true;
-        tree.add(foliage);
+        // Multiple cone layers for realistic pine tree
+        const numLayers = 4;
+        for (let i = 0; i < numLayers; i++) {
+          const layerScale = 1 - i * 0.15;
+          const layerY = 3 + i * 1.8;
+          const layerRadius = (3.0 - i * 0.5) * scale * layerScale;
+          const layerHeight = (3.5 - i * 0.3) * scale;
+
+          // Main foliage cone
+          const coneGeo = new THREE.ConeGeometry(layerRadius, layerHeight, 8);
+          const cone = new THREE.Mesh(coneGeo, foliageMat);
+          cone.position.y = layerY * scale;
+          cone.castShadow = true;
+          cone.receiveShadow = true;
+          tree.add(cone);
+
+          // Snow cap on top of each layer
+          const snowCapGeo = new THREE.ConeGeometry(layerRadius * 0.85, layerHeight * 0.3, 8);
+          const snowCap = new THREE.Mesh(snowCapGeo, snowMat);
+          snowCap.position.y = (layerY + layerHeight * 0.35) * scale;
+          snowCap.castShadow = true;
+          tree.add(snowCap);
+        }
+
+        // Snow on ground around tree
+        const snowPileGeo = new THREE.SphereGeometry(1.2 * scale, 8, 4, 0, Math.PI * 2, 0, Math.PI / 2);
+        const snowPile = new THREE.Mesh(snowPileGeo, snowMat);
+        snowPile.position.y = 0;
+        snowPile.scale.y = 0.3;
+        tree.add(snowPile);
 
         tree.position.set(treeX, height, treeZ);
+        tree.rotation.y = Math.random() * Math.PI * 2;
         treeGroup.add(tree);
       }
     }
 
     this.sceneManager.add(treeGroup);
+
+    // Add snow-covered rocks
+    this.addRocks();
+  }
+
+  addRocks() {
+    const rockGroup = new THREE.Group();
+
+    // Rock materials
+    const rockMat = new THREE.MeshStandardMaterial({
+      color: 0x555566,
+      roughness: 0.9,
+      metalness: 0.1
+    });
+    const snowMat = new THREE.MeshStandardMaterial({
+      color: 0xfafafa,
+      roughness: 0.7
+    });
+
+    const spacing = 25;
+
+    for (let z = -this.length / 2 + 50; z < this.length / 2 - 50; z += spacing) {
+      for (let x = -this.width / 2 + 15; x < this.width / 2 - 15; x += spacing) {
+        const trailDist = this.getTrailDistance(x, z);
+        if (trailDist < 2.0) continue;
+
+        // Only place some rocks
+        const rockNoise = this.detailNoise.noise2D(x * 0.08, z * 0.08);
+        if (rockNoise < 0.4) continue;
+
+        const ox = (this.noise.noise2D(x * 0.2, z * 0.2) - 0.5) * spacing * 0.4;
+        const oz = (this.noise.noise2D(x * 0.25, z * 0.22) - 0.5) * spacing * 0.4;
+        const rockX = x + ox;
+        const rockZ = z + oz;
+
+        const height = this.calculateHeight(rockX, rockZ);
+        const scale = 0.5 + Math.random() * 1.5;
+
+        const rock = new THREE.Group();
+
+        // Main rock body - irregular shape using dodecahedron
+        const rockGeo = new THREE.DodecahedronGeometry(1.5 * scale, 0);
+        const rockMesh = new THREE.Mesh(rockGeo, rockMat);
+        rockMesh.scale.set(1, 0.6, 0.9);
+        rockMesh.rotation.set(Math.random() * 0.3, Math.random() * Math.PI, Math.random() * 0.3);
+        rockMesh.castShadow = true;
+        rockMesh.receiveShadow = true;
+        rock.add(rockMesh);
+
+        // Snow on top of rock
+        const snowGeo = new THREE.SphereGeometry(1.3 * scale, 8, 4, 0, Math.PI * 2, 0, Math.PI / 2);
+        const snowMesh = new THREE.Mesh(snowGeo, snowMat);
+        snowMesh.position.y = 0.5 * scale;
+        snowMesh.scale.set(1, 0.4, 1);
+        rock.add(snowMesh);
+
+        rock.position.set(rockX, height - 0.3 * scale, rockZ);
+        rockGroup.add(rock);
+      }
+    }
+
+    this.sceneManager.add(rockGroup);
   }
 
   addTrailMarkers() {
@@ -1044,5 +1199,19 @@ export class TerrainGenerator {
 
   getHeightAt(x, z) {
     return this.calculateHeight(x, z);
+  }
+
+  /**
+   * Update terrain shader uniforms
+   * @param {number} time - Current time for sparkle animation
+   * @param {THREE.Vector3} cameraPosition - Camera position for view-dependent effects
+   */
+  updateShader(time, cameraPosition) {
+    if (this.terrainMaterial && this.terrainMaterial.uniforms) {
+      this.terrainMaterial.uniforms.time.value = time;
+      if (cameraPosition) {
+        this.terrainMaterial.uniforms.cameraPosition.value.copy(cameraPosition);
+      }
+    }
   }
 }

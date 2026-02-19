@@ -45,6 +45,20 @@ export class CarveMarks {
       depthWrite: false,
     });
 
+    // Glow trail for high-quality carves
+    this.glowMaterial = new THREE.MeshBasicMaterial({
+      color: 0x88ddff,
+      transparent: true,
+      opacity: 0.4,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+
+    // Active glow trail
+    this.activeGlowTrail = null;
+    this.glowTrails = [];
+
     // Ghost material
     this.ghostMaterial = new THREE.MeshBasicMaterial({
       color: 0xffdd88,
@@ -57,6 +71,11 @@ export class CarveMarks {
     // Current carve quality (set externally by CarveAnalyzer)
     this.currentCarveQuality = 0.5;
     this.currentPhase = 'neutral';
+
+    // === GLOW TRAIL SYSTEM ===
+    // Active glow trail for high-quality carves
+    this.glowThreshold = 0.7; // Quality threshold for glow
+    this.glowWidth = 0.25;    // Wider than base trail
   }
 
   // Called each frame from PlayerController
@@ -155,6 +174,130 @@ export class CarveMarks {
 
     // Rebuild mesh with new point
     this.rebuildTrailMesh(this.activeTrail);
+
+    // === GLOW TRAIL for high-quality carves ===
+    if (this.currentCarveQuality >= this.glowThreshold) {
+      if (!this.activeGlowTrail) {
+        this.startNewGlowTrail(edgeSide);
+      }
+      this.addGlowPoint(position, heading, intensity, this.currentCarveQuality);
+    } else if (this.activeGlowTrail) {
+      this.endGlowTrail();
+    }
+  }
+
+  /**
+   * Start a new glow trail
+   */
+  startNewGlowTrail(edgeSide) {
+    // Remove oldest glow trail if at max
+    if (this.glowTrails.length >= 10) {
+      const oldGlow = this.glowTrails.shift();
+      if (oldGlow.mesh) {
+        this.sceneManager.scene.remove(oldGlow.mesh);
+        oldGlow.mesh.geometry.dispose();
+      }
+    }
+
+    this.activeGlowTrail = {
+      points: [],
+      edgeSide: edgeSide,
+      mesh: null,
+      age: 0
+    };
+
+    this.glowTrails.push(this.activeGlowTrail);
+  }
+
+  /**
+   * Add point to glow trail
+   */
+  addGlowPoint(position, heading, intensity, quality) {
+    if (!this.activeGlowTrail) return;
+
+    // Limit glow trail length
+    if (this.activeGlowTrail.points.length >= 200) {
+      this.endGlowTrail();
+      this.startNewGlowTrail(this.activeGlowTrail?.edgeSide || 1);
+    }
+
+    // Glow intensity based on quality above threshold
+    const glowIntensity = (quality - this.glowThreshold) / (1 - this.glowThreshold);
+
+    this.activeGlowTrail.points.push({
+      position: position.clone(),
+      heading: heading,
+      width: this.glowWidth * (0.8 + intensity * 0.4 + glowIntensity * 0.3),
+      intensity: glowIntensity
+    });
+
+    this.rebuildGlowMesh(this.activeGlowTrail);
+  }
+
+  /**
+   * End current glow trail
+   */
+  endGlowTrail() {
+    this.activeGlowTrail = null;
+  }
+
+  /**
+   * Rebuild glow trail mesh
+   */
+  rebuildGlowMesh(glowTrail) {
+    if (glowTrail.points.length < 2) return;
+
+    // Remove old mesh
+    if (glowTrail.mesh) {
+      this.sceneManager.scene.remove(glowTrail.mesh);
+      glowTrail.mesh.geometry.dispose();
+    }
+
+    const points = glowTrail.points;
+    const vertices = [];
+    const indices = [];
+
+    for (let i = 0; i < points.length; i++) {
+      const p = points[i];
+
+      let perpX, perpZ;
+      if (i < points.length - 1) {
+        const next = points[i + 1];
+        const dx = next.position.x - p.position.x;
+        const dz = next.position.z - p.position.z;
+        const len = Math.sqrt(dx * dx + dz * dz) || 1;
+        perpX = -dz / len;
+        perpZ = dx / len;
+      } else {
+        perpX = Math.cos(p.heading);
+        perpZ = Math.sin(p.heading);
+      }
+
+      const halfWidth = p.width * 0.5;
+
+      vertices.push(
+        p.position.x + perpX * halfWidth,
+        p.position.y + 0.01, // Slightly above ground
+        p.position.z + perpZ * halfWidth,
+        p.position.x - perpX * halfWidth,
+        p.position.y + 0.01,
+        p.position.z - perpZ * halfWidth
+      );
+
+      if (i < points.length - 1) {
+        const base = i * 2;
+        indices.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+      }
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+    geometry.setIndex(indices);
+
+    glowTrail.mesh = new THREE.Mesh(geometry, this.glowMaterial.clone());
+    glowTrail.mesh.renderOrder = -0.5; // Between regular trails and ghost
+
+    this.sceneManager.scene.add(glowTrail.mesh);
   }
 
   /**
@@ -264,9 +407,13 @@ export class CarveMarks {
       this.activeTrail.fading = false;
     }
     this.activeTrail = null;
+
+    // Also end any active glow trail
+    this.endGlowTrail();
   }
 
   updateTrails(dt) {
+    // Update regular trails
     for (let i = this.trails.length - 1; i >= 0; i--) {
       const trail = this.trails[i];
 
@@ -292,6 +439,41 @@ export class CarveMarks {
           // Fade opacity
           trail.mesh.material.opacity = 0.6 * (1 - fadeProgress);
         }
+      }
+    }
+
+    // Update glow trails - they fade faster for dramatic effect
+    const glowLifetime = 3; // Glow trails last 3 seconds
+    const glowFadeDuration = 2; // Fade over 2 seconds
+
+    for (let i = this.glowTrails.length - 1; i >= 0; i--) {
+      const glowTrail = this.glowTrails[i];
+
+      // Don't age the active glow trail
+      if (glowTrail === this.activeGlowTrail) continue;
+
+      glowTrail.age += dt;
+
+      if (glowTrail.age > glowLifetime) {
+        const fadeProgress = (glowTrail.age - glowLifetime) / glowFadeDuration;
+
+        if (fadeProgress >= 1) {
+          // Fully faded - remove
+          if (glowTrail.mesh) {
+            this.sceneManager.scene.remove(glowTrail.mesh);
+            glowTrail.mesh.geometry.dispose();
+            glowTrail.mesh.material.dispose();
+          }
+          this.glowTrails.splice(i, 1);
+        } else if (glowTrail.mesh) {
+          // Fade opacity with pulsing effect
+          const pulse = 1 + Math.sin(glowTrail.age * 8) * 0.15;
+          glowTrail.mesh.material.opacity = 0.4 * (1 - fadeProgress) * pulse;
+        }
+      } else if (glowTrail.mesh) {
+        // Subtle pulsing while active
+        const pulse = 1 + Math.sin(glowTrail.age * 6) * 0.1;
+        glowTrail.mesh.material.opacity = 0.4 * pulse;
       }
     }
   }
@@ -403,6 +585,7 @@ export class CarveMarks {
 
   // Clean up all trails
   dispose() {
+    // Clean up regular trails
     for (const trail of this.trails) {
       if (trail.mesh) {
         this.sceneManager.scene.remove(trail.mesh);
@@ -410,9 +593,22 @@ export class CarveMarks {
         trail.mesh.material.dispose();
       }
     }
+
+    // Clean up glow trails
+    for (const glowTrail of this.glowTrails) {
+      if (glowTrail.mesh) {
+        this.sceneManager.scene.remove(glowTrail.mesh);
+        glowTrail.mesh.geometry.dispose();
+        glowTrail.mesh.material.dispose();
+      }
+    }
+
     this.clearGhost();
     this.trails = [];
+    this.glowTrails = [];
     this.activeTrail = null;
+    this.activeGlowTrail = null;
     this.material.dispose();
+    this.glowMaterial.dispose();
   }
 }

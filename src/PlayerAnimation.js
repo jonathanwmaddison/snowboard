@@ -34,7 +34,14 @@ export function createAnimState() {
     legSpread: 0,
     styleFlair: 0,
     gForceCompression: 0,
-    carveRailStrength: 0
+    carveRailStrength: 0,
+    // Speed tuck state
+    tuckAmount: 0,        // 0-1 how tucked the rider is
+    targetTuckAmount: 0,
+    forwardLean: 0,       // Forward body lean for tuck
+    targetForwardLean: 0,
+    armTuck: 0,           // How tucked in the arms are
+    targetArmTuck: 0
   };
 }
 
@@ -65,6 +72,9 @@ export function createPlaceholderMesh() {
 
   this.mesh = new THREE.Group();
   this.mesh.add(this.boardMesh);
+
+  // Add board glow mesh for flex energy visualization
+  createBoardGlow.call(this);
 
   // Simple capsule placeholder for rider
   const riderGeometry = new THREE.CapsuleGeometry(0.2, 1.0, 4, 8);
@@ -101,6 +111,9 @@ export function createVisualMeshGLB() {
 
   this.mesh = new THREE.Group();
   this.mesh.add(this.boardMesh);
+
+  // Add board glow mesh for flex energy visualization
+  createBoardGlow.call(this);
 
   // Position character on board
   const characterGroup = this.playerModelGLB.mesh;
@@ -175,19 +188,140 @@ export function createColliderMesh() {
 }
 
 /**
- * Create spray particle system
+ * Create board glow mesh for flex energy visualization
+ * Shows energy building up in the board during carves
+ */
+export function createBoardGlow() {
+  // Create a slightly larger board shape for the glow
+  const glowGeometry = createSnowboardGeometry();
+  glowGeometry.scale(1.08, 1.5, 1.04); // Slightly larger
+
+  // Glow material with additive blending
+  const glowMaterial = new THREE.MeshBasicMaterial({
+    color: 0x00ffff,
+    transparent: true,
+    opacity: 0,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+
+  this.boardGlowMesh = new THREE.Mesh(glowGeometry, glowMaterial);
+  this.boardGlowMesh.position.y = 0.01; // Slightly above board
+  this.mesh.add(this.boardGlowMesh);
+
+  // Create edge glow particles for extra effect
+  const edgeParticleCount = 50;
+  const edgeGeometry = new THREE.BufferGeometry();
+  const edgePositions = new Float32Array(edgeParticleCount * 3);
+  const edgeSizes = new Float32Array(edgeParticleCount);
+
+  for (let i = 0; i < edgeParticleCount; i++) {
+    // Position along board edge
+    const t = (i / edgeParticleCount) * Math.PI * 2;
+    edgePositions[i * 3] = Math.cos(t) * 0.15;     // X - across board
+    edgePositions[i * 3 + 1] = 0.02;               // Y - slightly above
+    edgePositions[i * 3 + 2] = Math.sin(t) * 0.7;  // Z - along board
+    edgeSizes[i] = 0;
+  }
+
+  edgeGeometry.setAttribute('position', new THREE.BufferAttribute(edgePositions, 3));
+  edgeGeometry.setAttribute('size', new THREE.BufferAttribute(edgeSizes, 1));
+
+  const edgeMaterial = new THREE.PointsMaterial({
+    color: 0x88ffff,
+    size: 0.08,
+    transparent: true,
+    opacity: 0,
+    sizeAttenuation: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+
+  this.boardGlowParticles = new THREE.Points(edgeGeometry, edgeMaterial);
+  this.mesh.add(this.boardGlowParticles);
+
+  // Initialize glow state
+  this.boardGlowIntensity = 0;
+  this.boardGlowPulse = 0;
+}
+
+/**
+ * Update board glow based on flex energy
+ * @param {number} dt - Delta time
+ * @param {number} flexEnergy - Current flex energy (0-1)
+ * @param {number} boardFlex - Current board flex amount
+ * @param {number} carveRailStrength - Current rail strength
+ */
+export function updateBoardGlow(dt, flexEnergy, boardFlex, carveRailStrength) {
+  if (!this.boardGlowMesh) return;
+
+  // Target intensity based on flex energy
+  const targetIntensity = flexEnergy * 0.8 + boardFlex * 0.3 * carveRailStrength;
+
+  // Smooth approach to target (faster buildup, slower decay)
+  const lerpRate = targetIntensity > this.boardGlowIntensity ? 8 : 3;
+  this.boardGlowIntensity = THREE.MathUtils.lerp(this.boardGlowIntensity, targetIntensity, lerpRate * dt);
+
+  // Pulsing effect that increases with energy
+  this.boardGlowPulse += dt * (4 + flexEnergy * 8);
+  const pulse = 1 + Math.sin(this.boardGlowPulse) * 0.2 * this.boardGlowIntensity;
+
+  // Update main glow mesh
+  const glowOpacity = this.boardGlowIntensity * 0.4 * pulse;
+  this.boardGlowMesh.material.opacity = Math.min(glowOpacity, 0.6);
+
+  // Color shifts from cyan to white as energy builds
+  const colorIntensity = Math.min(this.boardGlowIntensity * 1.5, 1);
+  const r = 0.3 + colorIntensity * 0.7;
+  const g = 1.0;
+  const b = 1.0;
+  this.boardGlowMesh.material.color.setRGB(r, g, b);
+
+  // Update edge particles
+  if (this.boardGlowParticles && this.boardGlowIntensity > 0.1) {
+    const positions = this.boardGlowParticles.geometry.attributes.position.array;
+    const sizes = this.boardGlowParticles.geometry.attributes.size.array;
+
+    for (let i = 0; i < sizes.length; i++) {
+      // Animate particles along board edge
+      const t = (i / sizes.length) * Math.PI * 2 + this.boardGlowPulse * 0.5;
+
+      // Oval path along board edge
+      positions[i * 3] = Math.cos(t) * 0.12;
+      positions[i * 3 + 2] = Math.sin(t) * 0.68;
+
+      // Height varies with pulse
+      positions[i * 3 + 1] = 0.02 + Math.sin(t * 2 + this.boardGlowPulse) * 0.03 * this.boardGlowIntensity;
+
+      // Size pulses with energy
+      sizes[i] = 0.04 + this.boardGlowIntensity * 0.08 * (0.5 + Math.sin(t + this.boardGlowPulse * 2) * 0.5);
+    }
+
+    this.boardGlowParticles.geometry.attributes.position.needsUpdate = true;
+    this.boardGlowParticles.geometry.attributes.size.needsUpdate = true;
+    this.boardGlowParticles.material.opacity = this.boardGlowIntensity * 0.6;
+  } else if (this.boardGlowParticles) {
+    this.boardGlowParticles.material.opacity = 0;
+  }
+}
+
+/**
+ * Create spray particle system with enhanced visuals
  */
 export function createSprayParticles() {
   const geometry = new THREE.BufferGeometry();
 
   this.sprayPositions = new Float32Array(this.maxParticles * 3);
   const sizes = new Float32Array(this.maxParticles);
+  const opacities = new Float32Array(this.maxParticles);
 
   for (let i = 0; i < this.maxParticles; i++) {
     this.sprayPositions[i * 3] = 0;
     this.sprayPositions[i * 3 + 1] = -1000;
     this.sprayPositions[i * 3 + 2] = 0;
     sizes[i] = 0;
+    opacities[i] = 0;
 
     this.sprayVelocities.push(new THREE.Vector3());
     this.sprayLifetimes.push(0);
@@ -195,16 +329,60 @@ export function createSprayParticles() {
 
   geometry.setAttribute('position', new THREE.BufferAttribute(this.sprayPositions, 3));
   geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+  geometry.setAttribute('opacity', new THREE.BufferAttribute(opacities, 1));
 
-  const material = new THREE.PointsMaterial({
-    color: 0xffffff,
-    size: 0.15,
+  // Enhanced shader material for soft, glowing snow particles
+  const material = new THREE.ShaderMaterial({
+    uniforms: {
+      baseColor: { value: new THREE.Color(0xffffff) },
+      glowColor: { value: new THREE.Color(0xccddff) }
+    },
+    vertexShader: `
+      attribute float size;
+      attribute float opacity;
+      varying float vOpacity;
+      varying float vSize;
+
+      void main() {
+        vOpacity = opacity;
+        vSize = size;
+        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_PointSize = size * (300.0 / -mvPosition.z);
+        gl_Position = projectionMatrix * mvPosition;
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 baseColor;
+      uniform vec3 glowColor;
+      varying float vOpacity;
+      varying float vSize;
+
+      void main() {
+        // Soft circular particle with glow
+        vec2 center = gl_PointCoord - vec2(0.5);
+        float dist = length(center);
+
+        // Soft falloff
+        float alpha = smoothstep(0.5, 0.0, dist) * vOpacity;
+
+        // Bright core with soft glow
+        float core = smoothstep(0.3, 0.0, dist);
+        vec3 color = mix(glowColor, baseColor, core);
+
+        // Add sparkle for larger particles
+        float sparkle = step(0.95, fract(sin(dot(gl_PointCoord, vec2(12.9898, 78.233))) * 43758.5453));
+        color += sparkle * 0.5 * step(0.15, vSize);
+
+        gl_FragColor = vec4(color, alpha);
+      }
+    `,
     transparent: true,
-    opacity: 0.8,
-    sizeAttenuation: true
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
   });
 
   this.sprayParticles = new THREE.Points(geometry, material);
+  this.sprayParticles.frustumCulled = false;
   this.sceneManager.add(this.sprayParticles);
 
   this.nextParticleIndex = 0;
@@ -223,11 +401,26 @@ export function updateSprayParticles(dt, speed, isCarving, edgeAngle) {
   const pos = this.body.translation();
   const positions = this.sprayParticles.geometry.attributes.position.array;
   const sizes = this.sprayParticles.geometry.attributes.size.array;
+  const opacities = this.sprayParticles.geometry.attributes.opacity?.array;
+
+  // Get carve quality for visual intensity
+  const carveQuality = this.carvePerfection || 0;
+  const flowBonus = (this.flowState || 0) * 0.5;
+  const absEdge = Math.abs(edgeAngle);
+  const gForce = this.currentGForce || 1.0;
 
   // Spawn new particles when grounded and moving
   if (this.isGrounded && speed > 3) {
-    const carveIntensity = isCarving ? (Math.abs(edgeAngle) * 2 + this.carveRailStrength * 3) : 0;
-    const spawnRate = Math.min(speed * 0.4, 10) + carveIntensity * 4;
+    // Enhanced intensity based on carve quality, commitment, and G-force
+    const baseIntensity = absEdge * 2.5 + this.carveRailStrength * 4;
+    const qualityBonus = carveQuality * 3;
+    const gForceBonus = gForce > 1.3 ? (gForce - 1) * 4 : 0;
+    const carveIntensity = isCarving ? (baseIntensity + qualityBonus + gForceBonus) * (1 + flowBonus) : 0;
+
+    // More particles during deep, quality carves - dramatically more at high G
+    const baseSpawnRate = Math.min(speed * 0.6, 15);
+    const carveSpawnBonus = carveIntensity * 8;
+    const spawnRate = baseSpawnRate + carveSpawnBonus;
     const particlesToSpawn = Math.floor(spawnRate * dt * 60);
 
     for (let i = 0; i < particlesToSpawn; i++) {
@@ -235,41 +428,66 @@ export function updateSprayParticles(dt, speed, isCarving, edgeAngle) {
       this.nextParticleIndex = (this.nextParticleIndex + 1) % this.maxParticles;
 
       const side = Math.sign(edgeAngle) || (Math.random() > 0.5 ? 1 : -1);
+
+      // Board forward direction (direction of travel)
+      const boardForward = new THREE.Vector3(
+        -Math.sin(this.heading),
+        0,
+        Math.cos(this.heading)
+      );
+
+      // Board right direction (perpendicular to travel)
       const boardRight = new THREE.Vector3(
         Math.cos(this.heading),
         0,
         Math.sin(this.heading)
       );
-      const boardBack = new THREE.Vector3(
-        Math.sin(this.heading),
-        0,
-        -Math.cos(this.heading)
-      );
 
-      // Spawn position
-      const spawnX = pos.x + boardRight.x * side * 0.2 + boardBack.x * 0.5 + (Math.random() - 0.5) * 0.3;
-      const spawnY = pos.y + 0.05;
-      const spawnZ = pos.z + boardRight.z * side * 0.2 + boardBack.z * 0.5 + (Math.random() - 0.5) * 0.3;
+      // Spawn at the carving edge contact point
+      const edgeOffset = side * 0.25 * (1 + absEdge * 0.5);
+      const backOffset = 0.4 + Math.random() * 0.3;
+
+      const spawnX = pos.x + boardRight.x * edgeOffset - boardForward.x * backOffset + (Math.random() - 0.5) * 0.15;
+      const spawnY = pos.y + 0.02;
+      const spawnZ = pos.z + boardRight.z * edgeOffset - boardForward.z * backOffset + (Math.random() - 0.5) * 0.15;
 
       positions[idx * 3] = spawnX;
       positions[idx * 3 + 1] = spawnY;
       positions[idx * 3 + 2] = spawnZ;
 
-      // Velocity
-      const carveBoost = isCarving ? 1 + this.carveRailStrength * 1.5 : 1;
-      const spraySpeed = (speed * 0.2 + Math.random() * 2.5) * carveBoost;
+      // Enhanced velocity - spray PERPENDICULAR to carve direction (away from turn)
+      // More dramatic spray during high-G carves
+      const gForceMultiplier = gForce > 1.2 ? 1 + (gForce - 1) * 0.8 : 1;
+      const carveBoost = isCarving ? (1.5 + this.carveRailStrength * 2.5 + carveQuality * 1.5) * gForceMultiplier : 1;
+      const baseSpraySpeed = (speed * 0.3 + Math.random() * 4) * carveBoost;
+
+      // Main spray direction is perpendicular to velocity (away from the carve)
+      const perpendicularSpeed = baseSpraySpeed * (0.9 + Math.random() * 0.4);
+      const upwardSpeed = (2.5 + Math.random() * 4 + absEdge * 3) * carveBoost;
+      const backwardSpeed = speed * 0.18 * (0.5 + Math.random() * 0.5);
+
+      // Add some randomness for a more natural spray pattern
+      const randomSpread = (1 + carveIntensity * 0.3);
+
       this.sprayVelocities[idx].set(
-        boardRight.x * side * spraySpeed + (Math.random() - 0.5) * 2,
-        (1.5 + Math.random() * 2.5) * carveBoost,
-        boardRight.z * side * spraySpeed + (Math.random() - 0.5) * 2
+        boardRight.x * side * perpendicularSpeed - boardForward.x * backwardSpeed + (Math.random() - 0.5) * 2 * randomSpread,
+        upwardSpeed,
+        boardRight.z * side * perpendicularSpeed - boardForward.z * backwardSpeed + (Math.random() - 0.5) * 2 * randomSpread
       );
 
-      // Add board velocity
-      this.sprayVelocities[idx].x -= this.velocity.x * 0.1;
-      this.sprayVelocities[idx].z -= this.velocity.z * 0.1;
+      // Particle size scales with carve intensity and G-force
+      const baseSize = 0.1 + Math.random() * 0.15;
+      const intensitySize = (absEdge * 0.12 + this.carveRailStrength * 0.15) * carveBoost;
+      const gForceSize = gForce > 1.5 ? (gForce - 1.5) * 0.1 : 0;
+      sizes[idx] = baseSize + intensitySize + gForceSize;
 
-      this.sprayLifetimes[idx] = 0.4 + Math.random() * 0.4;
-      sizes[idx] = 0.1 + Math.random() * 0.15;
+      // Set initial opacity
+      if (opacities) {
+        opacities[idx] = 0.8 + Math.random() * 0.2;
+      }
+
+      // Longer lifetime for dramatic sprays
+      this.sprayLifetimes[idx] = 0.6 + Math.random() * 0.6 + carveQuality * 0.3 + gForceSize * 2;
     }
   }
 
@@ -290,20 +508,29 @@ export function updateSprayParticles(dt, speed, isCarving, edgeAngle) {
       this.sprayVelocities[i].multiplyScalar(0.98);
 
       // Fade out
-      if (this.sprayLifetimes[i] < 0.2) {
-        sizes[i] *= 0.95;
+      if (this.sprayLifetimes[i] < 0.3) {
+        sizes[i] *= 0.92;
+        if (opacities) {
+          opacities[i] *= 0.9;
+        }
       }
 
       // Kill if too old
       if (this.sprayLifetimes[i] <= 0) {
         positions[i * 3 + 1] = -1000;
         sizes[i] = 0;
+        if (opacities) {
+          opacities[i] = 0;
+        }
       }
     }
   }
 
   this.sprayParticles.geometry.attributes.position.needsUpdate = true;
   this.sprayParticles.geometry.attributes.size.needsUpdate = true;
+  if (this.sprayParticles.geometry.attributes.opacity) {
+    this.sprayParticles.geometry.attributes.opacity.needsUpdate = true;
+  }
 }
 
 /**
@@ -325,6 +552,9 @@ export function updateMesh() {
 
   // Apply rider animation
   applyRiderAnimation.call(this, dt);
+
+  // Update board glow based on flex energy
+  updateBoardGlow.call(this, dt, this.flexEnergy || 0, this.boardFlex || 0, this.carveRailStrength || 0);
 
   // Board orientation
   if (this.isGrounded) {
@@ -388,7 +618,7 @@ export function updateMesh() {
 export function updateAnimationState(dt, speed2D, absEdge, edgeSign) {
   const anim = this.animState;
 
-  // G-force calculation
+  // G-force calculation - enhanced for more dramatic feel
   let gForce = 1.0;
   if (absEdge > 0.1 && speed2D > 3) {
     const turnRadius = this.sidecutRadius / Math.max(Math.sin(absEdge), 0.1);
@@ -396,16 +626,61 @@ export function updateAnimationState(dt, speed2D, absEdge, edgeSign) {
     gForce = Math.sqrt(1 + lateralG * lateralG);
   }
 
-  anim.gForceCompression = THREE.MathUtils.lerp(anim.gForceCompression, gForce, 12 * dt);
+  // Faster response to G-force changes for snappier feel
+  const gForceLerpRate = gForce > anim.gForceCompression ? 18 : 10; // Fast up, slower release
+  anim.gForceCompression = THREE.MathUtils.lerp(anim.gForceCompression, gForce, gForceLerpRate * dt);
 
-  // Leg compression from G-force
-  const minKneeAngle = 0.6;
-  const maxKneeAngle = 1.9;
+  // === SPEED TUCK SYSTEM ===
+  // Rider tucks at high speeds when going relatively straight and leaning forward
+  const tuckSpeedThreshold = 18;  // Start tucking above this speed
+  const tuckMaxSpeed = 35;        // Full tuck at this speed
+  const isGoingStraight = absEdge < 0.25; // Low edge angle = straight line
+  const wantsTuck = this.input.lean > 0.3; // Forward lean input
 
-  const speedBend = Math.min(speed2D / 20, 1) * 0.25;
-  const gCompression = Math.min((anim.gForceCompression - 1) * 0.7, 0.9);
-  let baseKneeAngle = minKneeAngle + speedBend + gCompression * (maxKneeAngle - minKneeAngle);
+  // Calculate target tuck amount
+  if (speed2D > tuckSpeedThreshold && isGoingStraight && wantsTuck && this.isGrounded) {
+    const speedTuckFactor = Math.min((speed2D - tuckSpeedThreshold) / (tuckMaxSpeed - tuckSpeedThreshold), 1);
+    const leanTuckFactor = Math.min((this.input.lean - 0.3) / 0.7, 1);
+    anim.targetTuckAmount = speedTuckFactor * leanTuckFactor;
+  } else {
+    anim.targetTuckAmount = 0;
+  }
+
+  // Smooth tuck transitions
+  const tuckLerpRate = anim.targetTuckAmount > anim.tuckAmount ? 4 : 6; // Slower to tuck, faster to untuck
+  anim.tuckAmount = THREE.MathUtils.lerp(anim.tuckAmount, anim.targetTuckAmount, tuckLerpRate * dt);
+
+  // Forward body lean for tuck position
+  anim.targetForwardLean = anim.tuckAmount * 0.4; // Max 0.4 radians forward lean
+  anim.forwardLean = THREE.MathUtils.lerp(anim.forwardLean, anim.targetForwardLean, 5 * dt);
+
+  // Arm tuck - arms come in closer to body
+  anim.targetArmTuck = anim.tuckAmount;
+  anim.armTuck = THREE.MathUtils.lerp(anim.armTuck, anim.targetArmTuck, 6 * dt);
+
+  // Leg compression from G-force - more dramatic range
+  const minKneeAngle = 0.55; // Slightly more extended at rest
+  const maxKneeAngle = 2.1;  // Can compress more during high-G
+
+  const speedBend = Math.min(speed2D / 18, 1) * 0.3; // More bend at speed
+
+  // Enhanced G-force compression curve - exponential feel
+  const gExcess = Math.max(0, anim.gForceCompression - 1);
+  const gCompression = gExcess * 0.5 + gExcess * gExcess * 0.25; // Quadratic curve for drama
+  const clampedGCompression = Math.min(gCompression, 1.1);
+
+  let baseKneeAngle = minKneeAngle + speedBend + clampedGCompression * (maxKneeAngle - minKneeAngle);
   baseKneeAngle += this.compression * 0.5;
+
+  // Extra "pump" compression during high-quality carves
+  if (this.carveRailStrength > 0.6 && anim.gForceCompression > 1.5) {
+    const carveBonus = (this.carveRailStrength - 0.6) * (anim.gForceCompression - 1.5) * 0.3;
+    baseKneeAngle += carveBonus;
+  }
+
+  // Speed tuck adds extra knee bend for low crouching position
+  const tuckKneeBend = anim.tuckAmount * 0.6;
+  baseKneeAngle += tuckKneeBend;
 
   // Front vs back leg differential
   const weightShift = edgeSign * absEdge * 0.55;
@@ -455,14 +730,24 @@ export function updateAnimationState(dt, speed2D, absEdge, edgeSign) {
   anim.legSpread = THREE.MathUtils.lerp(anim.legSpread, -edgeSign * absEdge * 0.15, 8 * dt);
 
   // Angulation
-  const speedFactor = Math.min(speed2D / 20, 1);
+  const speedFactor = Math.min(speed2D / 18, 1);
   const carveIntensity = absEdge * this.carveRailStrength;
 
-  anim.targetAngulation = -edgeSign * absEdge * 0.5 * (0.5 + speedFactor * 0.5);
-  anim.targetAngulation *= (1 + (anim.gForceCompression - 1) * 0.3);
+  // Enhanced angulation - more dramatic lean during high-G carves
+  anim.targetAngulation = -edgeSign * absEdge * 0.55 * (0.5 + speedFactor * 0.5);
 
+  // G-force amplifies angulation exponentially for dramatic effect
+  const gBonus = Math.max(0, anim.gForceCompression - 1);
+  anim.targetAngulation *= (1 + gBonus * 0.4 + gBonus * gBonus * 0.15);
+
+  // Rail lock amplifies angulation further
   if (this.carveRailStrength > 0.5) {
-    anim.targetAngulation *= 1 + this.carveRailStrength * 0.4;
+    anim.targetAngulation *= 1 + this.carveRailStrength * 0.5;
+  }
+
+  // Flow state adds subtle extra lean (confidence)
+  if (this.flowState > 0.5) {
+    anim.targetAngulation *= 1 + (this.flowState - 0.5) * 0.2;
   }
 
   // Counter-rotation
@@ -479,13 +764,20 @@ export function updateAnimationState(dt, speed2D, absEdge, edgeSign) {
     anim.targetHeadLook -= edgeSign * 0.2;
   }
 
-  // Arm dynamics
-  if (edgeSign > 0) {
-    anim.leftArmPose = THREE.MathUtils.lerp(anim.leftArmPose, -0.7 - carveIntensity * 0.4, 8 * dt);
-    anim.rightArmPose = THREE.MathUtils.lerp(anim.rightArmPose, 0.5 + carveIntensity * 0.3, 8 * dt);
+  // Arm dynamics - modified by tuck state
+  const tuckArmBlend = 1 - anim.armTuck; // 0 = full tuck, 1 = normal arms
+
+  if (anim.armTuck > 0.2) {
+    // During tuck: arms pulled in close to body, slightly forward
+    const tuckArmTarget = 0.3 + anim.armTuck * 0.4; // Arms tucked forward
+    anim.leftArmPose = THREE.MathUtils.lerp(anim.leftArmPose, tuckArmTarget, 6 * dt);
+    anim.rightArmPose = THREE.MathUtils.lerp(anim.rightArmPose, tuckArmTarget, 6 * dt);
+  } else if (edgeSign > 0) {
+    anim.leftArmPose = THREE.MathUtils.lerp(anim.leftArmPose, (-0.7 - carveIntensity * 0.4) * tuckArmBlend, 8 * dt);
+    anim.rightArmPose = THREE.MathUtils.lerp(anim.rightArmPose, (0.5 + carveIntensity * 0.3) * tuckArmBlend, 8 * dt);
   } else if (edgeSign < 0) {
-    anim.rightArmPose = THREE.MathUtils.lerp(anim.rightArmPose, -0.6 - carveIntensity * 0.4, 8 * dt);
-    anim.leftArmPose = THREE.MathUtils.lerp(anim.leftArmPose, 0.4 + carveIntensity * 0.3, 8 * dt);
+    anim.rightArmPose = THREE.MathUtils.lerp(anim.rightArmPose, (-0.6 - carveIntensity * 0.4) * tuckArmBlend, 8 * dt);
+    anim.leftArmPose = THREE.MathUtils.lerp(anim.leftArmPose, (0.4 + carveIntensity * 0.3) * tuckArmBlend, 8 * dt);
   } else {
     anim.leftArmPose = THREE.MathUtils.lerp(anim.leftArmPose, 0, 5 * dt);
     anim.rightArmPose = THREE.MathUtils.lerp(anim.rightArmPose, 0, 5 * dt);
@@ -554,6 +846,10 @@ export function applyRiderAnimation(dt) {
       roll: this.roll,
       spinVelocity: this.spinVelocity,
       leanInput: this.input.lean,
+      // Speed tuck state
+      tuckAmount: this.animState?.tuckAmount || 0,
+      forwardLean: this.animState?.forwardLean || 0,
+      armTuck: this.animState?.armTuck || 0,
     };
     this.playerModelGLB.applyPose(physicsState, dt);
   }
@@ -586,6 +882,13 @@ export function resetAnimState() {
     this.animState.legSpread = 0;
     this.animState.styleFlair = 0;
     this.animState.gForceCompression = 1;
+    // Reset tuck state
+    this.animState.tuckAmount = 0;
+    this.animState.targetTuckAmount = 0;
+    this.animState.forwardLean = 0;
+    this.animState.targetForwardLean = 0;
+    this.animState.armTuck = 0;
+    this.animState.targetArmTuck = 0;
   }
 }
 

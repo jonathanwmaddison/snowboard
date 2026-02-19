@@ -1,4 +1,8 @@
 import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 
 export class SceneManager {
   constructor() {
@@ -29,6 +33,12 @@ export class SceneManager {
 
     // Lighting setup
     this.setupLighting();
+
+    // Post-processing
+    this.composer = null;
+    this.bloomPass = null;
+    this.vignettePass = null;
+    this.postProcessingEnabled = true;
 
     // Handle resize
     window.addEventListener('resize', () => this.onResize());
@@ -79,6 +89,107 @@ export class SceneManager {
 
     // Add distant mountains silhouette
     this.addDistantMountains();
+
+    // Add sun disc
+    this.addSunDisc();
+  }
+
+  addSunDisc() {
+    // Sun position (matches directional light)
+    const sunDirection = new THREE.Vector3(200, 400, -300).normalize();
+
+    // Sun disc - bright glowing sphere
+    const sunGeo = new THREE.CircleGeometry(80, 32);
+    const sunMat = new THREE.ShaderMaterial({
+      uniforms: {
+        sunColor: { value: new THREE.Color(0xfffaf0) },
+        glowColor: { value: new THREE.Color(0xffdd88) },
+        glowIntensity: { value: 1.5 }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 sunColor;
+        uniform vec3 glowColor;
+        uniform float glowIntensity;
+        varying vec2 vUv;
+        void main() {
+          vec2 center = vec2(0.5);
+          float dist = length(vUv - center);
+
+          // Core sun - bright white center
+          float core = smoothstep(0.5, 0.0, dist);
+
+          // Soft glow around sun
+          float glow = smoothstep(0.5, 0.2, dist) * 0.6;
+
+          // Combine
+          vec3 color = mix(glowColor, sunColor, core);
+          float alpha = (core + glow) * glowIntensity;
+
+          gl_FragColor = vec4(color, alpha);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide
+    });
+
+    this.sunDisc = new THREE.Mesh(sunGeo, sunMat);
+    this.sunDisc.position.copy(sunDirection.multiplyScalar(1800));
+    this.sunDisc.lookAt(0, 0, 0);
+    this.scene.add(this.sunDisc);
+
+    // Sun lens flare / god rays effect (simple glow plane)
+    const flareGeo = new THREE.PlaneGeometry(400, 400);
+    const flareMat = new THREE.ShaderMaterial({
+      uniforms: {
+        time: { value: 0 }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform float time;
+        varying vec2 vUv;
+        void main() {
+          vec2 center = vec2(0.5);
+          float dist = length(vUv - center);
+
+          // Soft radial glow
+          float glow = smoothstep(0.5, 0.0, dist) * 0.15;
+
+          // Animated rays
+          float angle = atan(vUv.y - 0.5, vUv.x - 0.5);
+          float rays = sin(angle * 12.0 + time * 0.5) * 0.5 + 0.5;
+          rays = pow(rays, 3.0) * smoothstep(0.5, 0.1, dist) * 0.08;
+
+          vec3 color = vec3(1.0, 0.95, 0.8);
+          float alpha = glow + rays;
+
+          gl_FragColor = vec4(color, alpha);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide
+    });
+
+    this.sunFlare = new THREE.Mesh(flareGeo, flareMat);
+    this.sunFlare.position.copy(this.sunDisc.position);
+    this.sunFlare.lookAt(0, 0, 0);
+    this.scene.add(this.sunFlare);
   }
 
   addDistantMountains() {
@@ -172,10 +283,136 @@ export class SceneManager {
     const width = window.innerWidth;
     const height = window.innerHeight;
     this.renderer.setSize(width, height);
+
+    // Update composer size
+    if (this.composer) {
+      this.composer.setSize(width, height);
+    }
+  }
+
+  /**
+   * Setup post-processing effects
+   */
+  setupPostProcessing(camera) {
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+
+    // Create effect composer
+    this.composer = new EffectComposer(this.renderer);
+
+    // Render pass - renders the scene
+    const renderPass = new RenderPass(this.scene, camera);
+    this.composer.addPass(renderPass);
+
+    // Bloom pass - subtle glow on bright areas
+    this.bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(width, height),
+      0.4,   // strength - subtle
+      0.6,   // radius - soft spread
+      0.85   // threshold - only bright areas
+    );
+    this.composer.addPass(this.bloomPass);
+
+    // Custom vignette + color grading pass
+    const VignetteShader = {
+      uniforms: {
+        tDiffuse: { value: null },
+        vignetteIntensity: { value: 0.35 },
+        vignetteSoftness: { value: 0.5 },
+        saturation: { value: 1.1 },
+        contrast: { value: 1.05 },
+        brightness: { value: 0.02 },
+        colorTint: { value: new THREE.Color(0xfff8f0) }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tDiffuse;
+        uniform float vignetteIntensity;
+        uniform float vignetteSoftness;
+        uniform float saturation;
+        uniform float contrast;
+        uniform float brightness;
+        uniform vec3 colorTint;
+        varying vec2 vUv;
+
+        void main() {
+          vec4 texel = texture2D(tDiffuse, vUv);
+          vec3 color = texel.rgb;
+
+          // Brightness
+          color += brightness;
+
+          // Contrast
+          color = (color - 0.5) * contrast + 0.5;
+
+          // Saturation
+          float gray = dot(color, vec3(0.299, 0.587, 0.114));
+          color = mix(vec3(gray), color, saturation);
+
+          // Subtle warm color tint
+          color *= colorTint;
+
+          // Vignette
+          vec2 center = vUv - 0.5;
+          float dist = length(center);
+          float vignette = smoothstep(0.5, 0.5 - vignetteSoftness, dist);
+          vignette = mix(1.0 - vignetteIntensity, 1.0, vignette);
+          color *= vignette;
+
+          gl_FragColor = vec4(color, texel.a);
+        }
+      `
+    };
+
+    this.vignettePass = new ShaderPass(VignetteShader);
+    this.composer.addPass(this.vignettePass);
+
+    console.log('Post-processing enabled');
+  }
+
+  /**
+   * Update post-processing for camera changes
+   */
+  updatePostProcessing(camera) {
+    if (this.composer && this.composer.passes[0]) {
+      this.composer.passes[0].camera = camera;
+    }
+  }
+
+  /**
+   * Set bloom intensity (for speed effects)
+   */
+  setBloomIntensity(intensity) {
+    if (this.bloomPass) {
+      this.bloomPass.strength = 0.3 + intensity * 0.5;
+    }
+  }
+
+  /**
+   * Update sun flare animation
+   */
+  updateSunFlare(time) {
+    if (this.sunFlare && this.sunFlare.material.uniforms) {
+      this.sunFlare.material.uniforms.time.value = time;
+    }
   }
 
   render(camera) {
-    this.renderer.render(this.scene, camera);
+    // Update sun flare animation
+    this.updateSunFlare(performance.now() / 1000);
+
+    // Use composer if available, otherwise direct render
+    if (this.postProcessingEnabled && this.composer) {
+      this.composer.render();
+    } else {
+      this.renderer.render(this.scene, camera);
+    }
   }
 
   add(object) {

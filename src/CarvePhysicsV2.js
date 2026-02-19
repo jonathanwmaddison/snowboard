@@ -662,109 +662,148 @@ export function applyV2TurnPhysics(dt, speed2D) {
   const v2 = this.v2;
   const config = V2_CONFIG;
 
-  if (speed2D < 0.5) {
-    this.headingVelocity *= 0.85;
-    return;
+  // Initialize smoothed turn radius for V2
+  if (v2.smoothedTurnRadius === undefined) {
+    v2.smoothedTurnRadius = 50;
   }
 
   const absEdge = Math.abs(v2.physicalEdgeAngle);
+  const edgeSign = Math.sign(v2.physicalEdgeAngle);
+  const turnDir = v2.isSwitch ? -edgeSign : edgeSign;
+
+  // === DIRECT CONTROL COMPONENT ===
+  // At low speeds, edge angle directly influences heading (body steering)
+  const directControlStrength = Math.max(0, 1 - speed2D / 12);
+  const directTurnRate = absEdge * turnDir * 2.2 * (1 + directControlStrength);
+
+  if (speed2D < 0.3) {
+    // Very low speed - pure direct control
+    this.headingVelocity *= 0.8;
+    this.heading += directTurnRate * dt;
+    v2.smoothedTurnRadius = THREE.MathUtils.lerp(v2.smoothedTurnRadius, 50, 2 * dt);
+    return;
+  }
 
   if (absEdge < config.minEdgeForCarve) {
     // Flat base - minimal steering
     this.headingVelocity *= 0.9;
+    v2.smoothedTurnRadius = THREE.MathUtils.lerp(v2.smoothedTurnRadius, 80, 2 * dt);
     return;
   }
 
-  // Calculate angular velocity from turn radius
-  let angularVel = 0;
+  // Smooth the turn radius to prevent jerky changes
+  const targetRadius = v2.effectiveTurnRadius < Infinity ? v2.effectiveTurnRadius : 80;
+  const radiusSmoothRate = absEdge > 0.3 ? 6 : 3;
+  v2.smoothedTurnRadius = THREE.MathUtils.lerp(
+    v2.smoothedTurnRadius,
+    targetRadius,
+    radiusSmoothRate * dt
+  );
 
-  if (v2.isCarving && v2.effectiveTurnRadius < Infinity) {
-    // Pure carve - follow the arc
-    angularVel = speed2D / v2.effectiveTurnRadius;
+  // Calculate physics-based angular velocity from smoothed turn radius
+  let physicsAngularVel = 0;
 
-    // Direction based on edge (accounting for switch)
-    const turnDir = v2.isSwitch ? -Math.sign(v2.physicalEdgeAngle) : Math.sign(v2.physicalEdgeAngle);
-    angularVel *= turnDir;
+  if (v2.isCarving && v2.smoothedTurnRadius < 100) {
+    physicsAngularVel = speed2D / v2.smoothedTurnRadius * turnDir;
   } else if (v2.isSkidding) {
-    // Skidding - reduced turn rate, more friction
-    const skidRadius = v2.effectiveTurnRadius * (1 + v2.slipAngle * 2);
-    angularVel = speed2D / skidRadius;
-
-    const turnDir = v2.isSwitch ? -Math.sign(v2.physicalEdgeAngle) : Math.sign(v2.physicalEdgeAngle);
-    angularVel *= turnDir * (1 - v2.slipAngle * 0.5);  // Reduced turn authority when skidding
+    const skidRadius = v2.smoothedTurnRadius * (1 + v2.slipAngle * 2);
+    physicsAngularVel = speed2D / skidRadius * turnDir * (1 - v2.slipAngle * 0.5);
   }
+
+  // Blend physics and direct control based on speed
+  const physicsWeight = Math.min(speed2D / 10, 1);
+  const directWeight = 1 - physicsWeight * 0.7;
+  const targetAngularVel = physicsAngularVel * physicsWeight + directTurnRate * directWeight;
 
   // Smooth heading velocity
   const turnInertia = 1 + speed2D * 0.02;
-  const turnResponse = 6 / turnInertia;
+  const turnResponse = 8 / turnInertia;
 
   this.headingVelocity = THREE.MathUtils.lerp(
     this.headingVelocity,
-    angularVel,
+    targetAngularVel,
     turnResponse * dt
   );
 
-  // Clamp max turn rate
+  // Soft clamp max turn rate
   const maxTurnRate = 3.0;
-  this.headingVelocity = THREE.MathUtils.clamp(this.headingVelocity, -maxTurnRate, maxTurnRate);
+  if (Math.abs(this.headingVelocity) > maxTurnRate) {
+    this.headingVelocity *= 0.97;
+  }
 
   // Apply heading change
   this.heading += this.headingVelocity * dt;
 }
 
 /**
- * Apply skid friction to velocity
- * When skidding, the board slides sideways and scrubs speed
- * This is the PRIMARY mechanism for slowing down in snowboarding
+ * Normalize angle to -PI to PI range
  */
-export function applySkidFriction(dt, speed2D, forward, right) {
+function normalizeAngle(angle) {
+  while (angle > Math.PI) angle -= Math.PI * 2;
+  while (angle < -Math.PI) angle += Math.PI * 2;
+  return angle;
+}
+
+/**
+ * Apply velocity alignment and braking
+ * Simple system: velocity follows heading, back-weight applies brake
+ */
+export function applySkidFriction(dt, speed2D, _forward, _right) {
   const v2 = this.v2;
-  const config = V2_CONFIG;
 
-  if (!v2.isSkidding || speed2D < 0.5) return;
+  if (speed2D < 0.5) return;
 
-  // Friction coefficient scales with slip angle and edge angle
-  // More sideways = more friction = more speed scrubbed
+  // Calculate slip angle for visual feedback
+  const velDir = Math.atan2(-this.velocity.x, this.velocity.z);
+  const actualSlipAngle = normalizeAngle(velDir - this.heading);
+  v2.actualSlipAngle = actualSlipAngle;
+  v2.slipAngle = Math.abs(actualSlipAngle);
+
   const absEdge = Math.abs(v2.physicalEdgeAngle);
-  const frictionCoef = config.skidFriction * (1 + v2.slipAngle * 2) * (1 + absEdge * 0.5);
 
-  // Normal force (weight on snow)
-  const normalForce = this.mass * 9.81;
+  // === CARVING - VELOCITY FOLLOWS HEADING ===
+  const edgeGrip = 0.4 + absEdge * 0.6;
 
-  // === LATERAL FRICTION ===
-  // Friction opposes sideways sliding
-  const lateralSpeed = this.velocity.dot(right);
-  const lateralFriction = frictionCoef * normalForce * v2.slipAngle;
-  const lateralDecel = lateralFriction / this.mass;
+  // Back-weighting loosens carve (requires more commitment)
+  const isBackWeighted = v2.pressureDistribution < 0.35;
+  const gripModifier = isBackWeighted ? 0.3 : 1.0;
 
-  // Apply lateral friction
-  const lateralReduction = Math.min(Math.abs(lateralSpeed), lateralDecel * dt);
-  this.velocity.x -= right.x * Math.sign(lateralSpeed) * lateralReduction;
-  this.velocity.z -= right.z * Math.sign(lateralSpeed) * lateralReduction;
+  // Strong velocity alignment for clean carving
+  const alignStrength = edgeGrip * gripModifier * 8 * dt;
+  const newVelDir = velDir + normalizeAngle(this.heading - velDir) * alignStrength;
+  this.velocity.x = -Math.sin(newVelDir) * speed2D;
+  this.velocity.z = Math.cos(newVelDir) * speed2D;
 
-  // === FORWARD SPEED SCRUB ===
-  // When board is angled across the fall line and skidding,
-  // the sideways friction component also scrubs forward speed
-  // This is how snowboarders actually slow down!
-  const forwardSpeed = this.velocity.dot(forward);
+  // Update carve state
+  v2.isCarving = !isBackWeighted && absEdge > 0.1;
+  v2.isSkidding = isBackWeighted;
+  v2.carveQuality = v2.isCarving
+    ? Math.min(1, v2.carveQuality + dt * 1.5)
+    : Math.max(0, v2.carveQuality - dt * 2);
 
-  if (forwardSpeed > 0) {
-    // Scrub rate depends on: slip angle, edge angle, and speed
-    // Higher slip angle = board more sideways = more scrubbing
-    // Higher edge angle = more edge digging in = more friction
-    const scrubRate = v2.slipAngle * (1 + absEdge) * frictionCoef;
-    const speedScrub = scrubRate * speed2D * dt;
+  // === HOCKEY STOP (S + HARD TURN) ===
+  // Requires commitment - not casual braking
+  if (isBackWeighted && absEdge > 0.4 && speed2D > 2) {
+    const brakeCommitment = Math.min((0.35 - v2.pressureDistribution) / 0.25, 1);
+    const edgeCommitment = Math.min((absEdge - 0.4) / 0.6, 1);
 
-    // Apply forward speed reduction
-    const scrubAmount = Math.min(forwardSpeed, speedScrub);
-    this.velocity.x -= forward.x * scrubAmount;
-    this.velocity.z -= forward.z * scrubAmount;
+    const stopPower = brakeCommitment * edgeCommitment;
+    const frictionCoeff = 0.3 + absEdge * 0.4;
+    const frictionForce = stopPower * frictionCoeff * speed2D * 3.0;
+
+    const speedLoss = frictionForce * dt;
+    if (speed2D > speedLoss) {
+      const scale = (speed2D - speedLoss) / speed2D;
+      this.velocity.x *= scale;
+      this.velocity.z *= scale;
+    }
+
+    this.targetCompression = Math.max(this.targetCompression || 0, stopPower * 0.3);
   }
 
-  // === VISUAL FEEDBACK ===
-  // Spray intensity scales with how much speed we're scrubbing
-  v2.sprayIntensity = v2.slipAngle * speed2D * 0.15 * (1 + absEdge);
-  v2.edgeScrapeIntensity = v2.slipAngle * absEdge;
+  // Visual feedback
+  v2.sprayIntensity = absEdge * speed2D * 0.08;
+  v2.edgeScrapeIntensity = isBackWeighted ? absEdge * 0.5 : 0;
 }
 
 /**

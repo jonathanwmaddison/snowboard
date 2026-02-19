@@ -22,6 +22,13 @@ export class Atmosphere {
     this.maxSnowParticles = 3000;
     this.snowArea = { width: 150, height: 80, depth: 150 };
 
+    // Snow sparkles on ground (glittering effect)
+    this.sparkleParticles = null;
+    this.sparklePositions = null;
+    this.sparkleLifetimes = [];
+    this.maxSparkles = 500;
+    this.sparkleArea = { width: 60, depth: 60 };
+
     // Fog settings
     this.fog = null;
     this.baseFogDensity = 0.0008;
@@ -47,8 +54,54 @@ export class Atmosphere {
 
   init() {
     this.createSnow();
+    this.createSparkles();
     this.createFog();
     this.setupLighting();
+  }
+
+  /**
+   * Create ground sparkle particle system (glittering snow)
+   */
+  createSparkles() {
+    const geometry = new THREE.BufferGeometry();
+
+    this.sparklePositions = new Float32Array(this.maxSparkles * 3);
+    const sizes = new Float32Array(this.maxSparkles);
+    const opacities = new Float32Array(this.maxSparkles);
+
+    // Initialize sparkles
+    for (let i = 0; i < this.maxSparkles; i++) {
+      this.sparklePositions[i * 3] = (Math.random() - 0.5) * this.sparkleArea.width;
+      this.sparklePositions[i * 3 + 1] = 0.05; // Just above ground
+      this.sparklePositions[i * 3 + 2] = (Math.random() - 0.5) * this.sparkleArea.depth;
+
+      this.sparkleLifetimes.push({
+        life: Math.random() * 2, // Stagger initial timing
+        maxLife: 0.3 + Math.random() * 0.5,
+        intensity: Math.random()
+      });
+
+      sizes[i] = 0.05 + Math.random() * 0.1;
+      opacities[i] = 0;
+    }
+
+    geometry.setAttribute('position', new THREE.BufferAttribute(this.sparklePositions, 3));
+    geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+    // Sparkle material - bright white points
+    const material = new THREE.PointsMaterial({
+      color: 0xffffff,
+      size: 0.15,
+      transparent: true,
+      opacity: 0.9,
+      sizeAttenuation: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending
+    });
+
+    this.sparkleParticles = new THREE.Points(geometry, material);
+    this.sparkleParticles.frustumCulled = false;
+    this.scene.add(this.sparkleParticles);
   }
 
   /**
@@ -129,7 +182,65 @@ export class Atmosphere {
     this.playerPosition.copy(playerPosition);
 
     this.updateSnow(dt);
+    this.updateSparkles(dt);
     this.updateFog(playerPosition);
+  }
+
+  /**
+   * Update sparkle particles (twinkling effect)
+   */
+  updateSparkles(dt) {
+    if (!this.sparkleParticles) return;
+
+    const positions = this.sparkleParticles.geometry.attributes.position.array;
+    const sizes = this.sparkleParticles.geometry.attributes.size.array;
+
+    for (let i = 0; i < this.maxSparkles; i++) {
+      const sparkle = this.sparkleLifetimes[i];
+
+      sparkle.life += dt;
+
+      // Calculate sparkle intensity (fade in/out)
+      const lifeRatio = sparkle.life / sparkle.maxLife;
+      let intensity = 0;
+
+      if (lifeRatio < 0.2) {
+        // Fade in
+        intensity = lifeRatio * 5;
+      } else if (lifeRatio < 0.8) {
+        // Full brightness with twinkle
+        intensity = 0.8 + Math.sin(sparkle.life * 20 + sparkle.intensity * 10) * 0.2;
+      } else if (lifeRatio < 1.0) {
+        // Fade out
+        intensity = (1 - lifeRatio) * 5;
+      } else {
+        // Reset sparkle
+        sparkle.life = 0;
+        sparkle.maxLife = 0.2 + Math.random() * 0.4;
+        sparkle.intensity = Math.random();
+
+        // Move to new position near player
+        positions[i * 3] = this.playerPosition.x + (Math.random() - 0.5) * this.sparkleArea.width;
+        positions[i * 3 + 2] = this.playerPosition.z + (Math.random() - 0.5) * this.sparkleArea.depth;
+
+        // Get ground height if terrain available
+        if (this.sceneManager.terrain) {
+          const groundHeight = this.sceneManager.terrain.getHeightAt(
+            positions[i * 3],
+            positions[i * 3 + 2]
+          );
+          positions[i * 3 + 1] = groundHeight + 0.05;
+        }
+
+        intensity = 0;
+      }
+
+      // Size represents brightness
+      sizes[i] = intensity * 0.2 * sparkle.intensity;
+    }
+
+    this.sparkleParticles.geometry.attributes.position.needsUpdate = true;
+    this.sparkleParticles.geometry.attributes.size.needsUpdate = true;
   }
 
   /**

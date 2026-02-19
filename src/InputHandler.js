@@ -19,7 +19,16 @@ export class InputHandler {
       toggleCarvePhysics: null,
       togglePlayerModel: null,
       toggleSportType: null,
-      triggerAvalanche: null
+      triggerAvalanche: null,
+      toggleFlying: null,
+      interact: null,  // E key for rocket launch
+      toggleWalking: null,  // B key for walking mode
+      toggleMinecraft: null,  // N key for minecraft mode
+      toggleFPS: null,  // U key for first-person view
+      toggleCrafting: null,  // Q key for crafting menu
+      toggleBuildMode: null,  // X key for build mode
+      placeBlock: null,  // Right-click or F to place block
+      hotkey: null  // Number keys 1-9 for hotbar
     };
 
     // Smoothed input state
@@ -252,6 +261,46 @@ export class InputHandler {
         break;
       case 'KeyY':
         if (this.callbacks.triggerAvalanche) this.callbacks.triggerAvalanche();
+        break;
+      case 'KeyF':
+        if (this.callbacks.toggleFlying) this.callbacks.toggleFlying();
+        break;
+      case 'KeyE':
+        if (this.callbacks.interact) this.callbacks.interact();
+        break;
+      case 'KeyB':
+        if (this.callbacks.toggleWalking) this.callbacks.toggleWalking();
+        break;
+      case 'KeyN':
+        if (this.callbacks.toggleMinecraft) this.callbacks.toggleMinecraft();
+        break;
+      case 'KeyU':
+        if (this.callbacks.toggleFPS) this.callbacks.toggleFPS();
+        break;
+      case 'KeyQ':
+        if (this.callbacks.toggleCrafting) this.callbacks.toggleCrafting();
+        break;
+      case 'KeyX':
+        if (this.callbacks.toggleBuildMode) this.callbacks.toggleBuildMode();
+        break;
+      case 'KeyF':
+        // F also places blocks in build mode (in addition to flying toggle)
+        if (this.callbacks.placeBlock) this.callbacks.placeBlock();
+        break;
+      // Number keys 1-9 for hotbar
+      case 'Digit1':
+      case 'Digit2':
+      case 'Digit3':
+      case 'Digit4':
+      case 'Digit5':
+      case 'Digit6':
+      case 'Digit7':
+      case 'Digit8':
+      case 'Digit9':
+        if (this.callbacks.hotkey) {
+          const num = parseInt(e.code.replace('Digit', ''));
+          this.callbacks.hotkey(num);
+        }
         break;
     }
   }
