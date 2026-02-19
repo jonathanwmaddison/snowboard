@@ -10,6 +10,7 @@ import { FlowScore } from './FlowScore.js';
 import { AudioSystem } from './AudioSystem.js';
 import { CarveAnalyzer } from './CarveAnalyzer.js';
 import { Atmosphere } from './Atmosphere.js';
+import { TutorialOverlay } from './TutorialOverlay.js';
 
 class Game {
   constructor() {
@@ -28,6 +29,7 @@ class Game {
     this.atmosphere = null;
     this.previousEdgeSide = 0;
     this.wasEdgeCaught = false;  // Track edge catch for feedback
+    this.tutorial = null;
 
     this.lastTime = 0;
     this.isRunning = false;
@@ -109,16 +111,18 @@ class Game {
     this.setupInput();
 
     console.log('Initialization complete!');
-    console.log('=== CONTROLS ===');
-    console.log('A/D or ←/→ = Turn | W = Tuck | S = Brake');
-    console.log('Space = Jump (hold to charge)');
-    console.log('IN AIR: A/D = Spin, W = Front flip, S = Back flip');
-    console.log('R = Restart | V = Toggle camera | C = Cycle camera mode');
-    console.log('P = Toggle physics (v1/v2) | T = Toggle sport (snowboard/ski)');
-    console.log('B = Walking mode | F = Flying mode | E = Interact (rocket)');
-    console.log('Gamepad: L-stick control, R-stick camera, A jump');
+    console.log('Press H for controls help');
 
-    // Start game loop
+    // Create tutorial overlay
+    this.tutorial = new TutorialOverlay();
+
+    // Show tutorial; game loop starts after dismissal
+    this.tutorial.show(() => {
+      this.startGameLoop();
+    });
+  }
+
+  startGameLoop() {
     this.isRunning = true;
     this.lastTime = performance.now();
     requestAnimationFrame((t) => this.gameLoop(t));
@@ -236,6 +240,11 @@ class Game {
       if (this.player.minecraftMode && this.player.minecraftMode.isEnabled() && this.player.minecraftMode.buildMode) {
         this.player.minecraftMode.placeBlock();
       }
+    });
+
+    // Help menu toggle
+    this.input.setCallback('toggleHelp', () => {
+      if (this.tutorial) this.tutorial.toggleHelp();
     });
 
     // Hotbar selection (number keys)
@@ -484,9 +493,9 @@ class Game {
     // Update shadow camera to follow player
     this.sceneManager.updateShadowCamera(this.player.getPosition());
 
-    // Update bloom intensity based on speed (more bloom at high speed)
+    // Update bloom intensity based on speed (subtle, only at higher speeds)
     const speedKmh = this.player.getSpeedKmh();
-    const speedBloom = Math.min(1, (speedKmh - 30) / 70); // Ramp from 30-100 km/h
+    const speedBloom = Math.min(1, Math.max(0, (speedKmh - 55) / 85)); // Ramp from 55-140 km/h
     this.sceneManager.setBloomIntensity(Math.max(0, speedBloom));
 
     // Update terrain shader (snow sparkle animation)

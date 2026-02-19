@@ -23,7 +23,7 @@ export class SceneManager {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.2;
+    this.renderer.toneMappingExposure = 1.0;
 
     // Enable shadows
     this.renderer.shadowMap.enabled = true;
@@ -307,9 +307,9 @@ export class SceneManager {
     // Bloom pass - subtle glow on bright areas
     this.bloomPass = new UnrealBloomPass(
       new THREE.Vector2(width, height),
-      0.4,   // strength - subtle
-      0.6,   // radius - soft spread
-      0.85   // threshold - only bright areas
+      0.12,  // strength - restrained
+      0.35,  // radius - tighter spread
+      0.93   // threshold - only the brightest highlights
     );
     this.composer.addPass(this.bloomPass);
 
@@ -390,7 +390,7 @@ export class SceneManager {
    */
   setBloomIntensity(intensity) {
     if (this.bloomPass) {
-      this.bloomPass.strength = 0.3 + intensity * 0.5;
+      this.bloomPass.strength = 0.08 + intensity * 0.18;
     }
   }
 

@@ -1,0 +1,287 @@
+/**
+ * Tutorial & Help Menu Styles
+ * Matches flow-ui.css aesthetic — dark translucent backdrop, white text, system fonts
+ */
+
+/* === TUTORIAL OVERLAY === */
+.tutorial-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 10, 25, 0.92);
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  color: white;
+  opacity: 1;
+  transition: opacity 0.4s ease-out;
+  cursor: pointer;
+}
+
+.tutorial-overlay.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.tutorial-title {
+  font-size: 64px;
+  font-weight: 200;
+  letter-spacing: 8px;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+  text-shadow: 0 0 40px rgba(150, 220, 255, 0.3);
+}
+
+.tutorial-tagline {
+  font-size: 16px;
+  font-weight: 300;
+  color: rgba(150, 220, 255, 0.8);
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  margin-bottom: 48px;
+}
+
+.tutorial-controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 48px;
+  margin-bottom: 48px;
+}
+
+.tutorial-column {
+  text-align: left;
+  min-width: 180px;
+  max-width: 260px;
+}
+
+.tutorial-column-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.5);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  margin-bottom: 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.tutorial-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.tutorial-key {
+  display: inline-block;
+  min-width: 36px;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.9);
+  flex-shrink: 0;
+}
+
+.tutorial-action {
+  font-size: 13px;
+  font-weight: 300;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.tutorial-prompt {
+  font-size: 13px;
+  font-weight: 300;
+  color: rgba(255, 255, 255, 0.4);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  animation: tutorialPulse 2s ease-in-out infinite;
+}
+
+@keyframes tutorialPulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.8; }
+}
+
+/* === IN-GAME HELP HOTKEY/BUTTON === */
+.help-hotkey {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 850;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 12px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(12, 12, 24, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+  backdrop-filter: blur(3px);
+  transition: border-color 0.2s, background 0.2s, color 0.2s;
+}
+
+.help-hotkey:hover {
+  border-color: rgba(150, 220, 255, 0.75);
+  color: rgba(190, 235, 255, 1);
+  background: rgba(16, 20, 36, 0.9);
+}
+
+.help-hotkey.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* === HELP MENU === */
+.help-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 10, 25, 0.85);
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  color: white;
+  opacity: 1;
+  transition: opacity 0.3s ease-out;
+}
+
+.help-overlay.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.help-panel {
+  background: rgba(20, 20, 40, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 32px 40px;
+  max-width: 720px;
+  width: 90%;
+  max-height: 80vh;
+  overflow-y: auto;
+  pointer-events: auto;
+}
+
+.help-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.help-title {
+  font-size: 20px;
+  font-weight: 300;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+}
+
+.help-close {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.help-close:hover {
+  color: rgba(255, 255, 255, 0.8);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.help-columns {
+  display: flex;
+  gap: 32px;
+}
+
+.help-column {
+  flex: 1;
+  min-width: 0;
+}
+
+.help-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(150, 220, 255, 0.7);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+  margin-top: 16px;
+}
+
+.help-column .help-section-title:first-child {
+  margin-top: 0;
+}
+
+.help-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 5px;
+}
+
+.help-key {
+  display: inline-block;
+  min-width: 28px;
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 500;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.8);
+  flex-shrink: 0;
+}
+
+.help-action {
+  font-size: 12px;
+  font-weight: 300;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* Responsive: stack columns on narrow screens */
+@media (max-width: 600px) {
+  .tutorial-controls {
+    flex-direction: column;
+    gap: 24px;
+    align-items: center;
+  }
+
+  .help-columns {
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .tutorial-title {
+    font-size: 40px;
+    letter-spacing: 4px;
+  }
+
+  .help-hotkey {
+    top: 10px;
+    right: 10px;
+    padding: 7px 10px;
+    font-size: 11px;
+  }
+}

@@ -103,7 +103,7 @@ export class CameraController {
         this.smoothedPosition.x,
         this.smoothedPosition.z
       );
-      const minHeight = groundHeight + 2;
+      const minHeight = groundHeight + 2.8;
       if (this.smoothedPosition.y < minHeight) {
         this.smoothedPosition.y = minHeight;
       }
@@ -143,6 +143,20 @@ export class CameraController {
       playerPosition.y + this.height,
       playerPosition.z - Math.cos(playerHeading) * this.distance
     );
+
+    // Clamp above terrain so initial spawn camera can't start under snow.
+    if (this.terrain) {
+      const groundHeight = this.terrain.getHeightAt(
+        this.smoothedPosition.x,
+        this.smoothedPosition.z
+      );
+      if (groundHeight !== undefined && !isNaN(groundHeight)) {
+        const minHeight = groundHeight + 2.8;
+        if (this.smoothedPosition.y < minHeight) {
+          this.smoothedPosition.y = minHeight;
+        }
+      }
+    }
 
     // Look at player
     this.smoothedLookAt.set(

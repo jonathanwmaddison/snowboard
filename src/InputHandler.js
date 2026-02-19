@@ -28,7 +28,8 @@ export class InputHandler {
       toggleCrafting: null,  // Q key for crafting menu
       toggleBuildMode: null,  // X key for build mode
       placeBlock: null,  // Right-click or F to place block
-      hotkey: null  // Number keys 1-9 for hotbar
+      hotkey: null,  // Number keys 1-9 for hotbar
+      toggleHelp: null  // H key for help menu
     };
 
     // Smoothed input state
@@ -282,6 +283,9 @@ export class InputHandler {
         break;
       case 'KeyX':
         if (this.callbacks.toggleBuildMode) this.callbacks.toggleBuildMode();
+        break;
+      case 'KeyH':
+        if (this.callbacks.toggleHelp) this.callbacks.toggleHelp();
         break;
       case 'KeyF':
         // F also places blocks in build mode (in addition to flying toggle)

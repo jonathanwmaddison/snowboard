@@ -91,6 +91,7 @@ export class CameraControllerV2 {
     this.cameraSpeed = 2.5;
     this.pitchMin = -0.4;
     this.pitchMax = 0.9;
+    this.minGroundClearance = 4.0;
 
     // === FLOW STATE EFFECTS ===
     this.flowIntensity = 0;        // 0-1 based on player flow state
@@ -287,8 +288,11 @@ export class CameraControllerV2 {
 
     // Camera lowers more dramatically during high-G carves
     const heightReduction = this.compressionEffect * (1 + gForceCompression * 0.3);
-    const targetHeight = activeMode.height - heightReduction +
-                         this.terrainGradient * 0.5;
+    const minModeHeight = Math.max(2.8, activeMode.height * 0.8);
+    const targetHeight = Math.max(
+      minModeHeight,
+      activeMode.height - heightReduction + this.terrainGradient * 0.5
+    );
     this.smoothedHeight = THREE.MathUtils.lerp(
       this.smoothedHeight, targetHeight, this.heightSmoothing
     );
@@ -324,11 +328,19 @@ export class CameraControllerV2 {
         this.smoothedPosition.z
       );
       if (groundHeight !== undefined && !isNaN(groundHeight)) {
-        const minHeight = groundHeight + 1.5;
+        const minHeight = groundHeight + this.minGroundClearance;
         if (this.smoothedPosition.y < minHeight) {
           this.smoothedPosition.y = minHeight;
         }
       }
+    }
+
+    this.applyTerrainViewClearance(playerPosition, 2.2);
+
+    // Keep third-person camera above rider centerline to avoid "below slope" feel.
+    const riderMinHeight = playerPosition.y + 1.8;
+    if (this.smoothedPosition.y < riderMinHeight) {
+      this.smoothedPosition.y = riderMinHeight;
     }
 
     // === NaN PROTECTION ===
@@ -538,6 +550,21 @@ export class CameraControllerV2 {
       playerPosition.z - Math.cos(playerHeading) * mode.distance
     );
 
+    // Clamp above terrain so camera never starts underground
+    if (this.terrain) {
+      const groundHeight = this.terrain.getHeightAt(
+        this.smoothedPosition.x,
+        this.smoothedPosition.z
+      );
+      if (groundHeight !== undefined && !isNaN(groundHeight)) {
+        const minHeight = groundHeight + this.minGroundClearance;
+        if (this.smoothedPosition.y < minHeight) {
+          this.smoothedPosition.y = minHeight;
+        }
+      }
+    }
+    this.applyTerrainViewClearance(playerPosition, 2.5);
+
     this.smoothedLookAt.set(
       playerPosition.x,
       playerPosition.y + mode.lookAtHeight,
@@ -552,6 +579,28 @@ export class CameraControllerV2 {
     this.camera.lookAt(this.smoothedLookAt);
     this.camera.fov = mode.fovBase;
     this.camera.updateProjectionMatrix();
+  }
+
+  applyTerrainViewClearance(playerPosition, clearance) {
+    if (!this.terrain) return;
+
+    let maxGround = -Infinity;
+    for (let i = 1; i <= 4; i++) {
+      const t = i / 5;
+      const sampleX = THREE.MathUtils.lerp(playerPosition.x, this.smoothedPosition.x, t);
+      const sampleZ = THREE.MathUtils.lerp(playerPosition.z, this.smoothedPosition.z, t);
+      const sampleGround = this.terrain.getHeightAt(sampleX, sampleZ);
+      if (sampleGround !== undefined && !isNaN(sampleGround)) {
+        maxGround = Math.max(maxGround, sampleGround);
+      }
+    }
+
+    if (Number.isFinite(maxGround)) {
+      const minViewHeight = maxGround + clearance;
+      if (this.smoothedPosition.y < minViewHeight) {
+        this.smoothedPosition.y = minViewHeight;
+      }
+    }
   }
 
   /**
