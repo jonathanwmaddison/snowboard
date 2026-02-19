@@ -537,6 +537,7 @@ export function updateSprayParticles(dt, speed, isCarving, edgeAngle) {
  * Update mesh position and orientation
  */
 export function updateMesh() {
+  if (!this.mesh || !this.body) return;
   const pos = this.body.translation();
   this.mesh.position.set(pos.x, pos.y, pos.z);
 

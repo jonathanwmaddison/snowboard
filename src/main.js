@@ -64,7 +64,7 @@ class Game {
 
     // Load the biped character model
     try {
-      await this.player.loadGLBModel('/biped/Character_output.glb');
+      await this.player.loadGLBModel(`${import.meta.env.BASE_URL}biped/Character_output.glb`);
       console.log('Biped character loaded successfully');
     } catch (err) {
       console.warn('Failed to load character model, using default:', err);
@@ -518,4 +518,4 @@ window.loadModel = async (url) => {
 };
 
 // Reload character if needed
-window.loadCharacter = () => window.loadModel('/biped/Character_output.glb');
+window.loadCharacter = () => window.loadModel(`${import.meta.env.BASE_URL}biped/Character_output.glb`);
